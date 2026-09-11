@@ -15,7 +15,7 @@ public static class ProfileCommands
       var profiles = alignment.GetProfileIds()
         .Cast<ObjectId>()
         .Select(id => CivilObjectUtils.GetRequiredObject<Profile>(transaction, id, OpenMode.ForRead))
-        .Select(ToProfileSummary)
+        .Select(profile => ToProfileSummary(profile, transaction))
         .ToList();
 
       return new Dictionary<string, object?>
@@ -43,9 +43,7 @@ public static class ProfileCommands
         ["handle"] = CivilObjectUtils.GetHandle(profile),
         ["type"] = MapProfileType(profile.ProfileType.ToString()),
         ["profileType"] = profile.ProfileType.ToString(),
-        ["style"] = AlignmentGeometryReader.TryRead(profile, "StyleName", out _) as string
-          ?? CivilObjectUtils.GetName(transaction.GetObject(profile.StyleId, OpenMode.ForRead))
-          ?? string.Empty,
+        ["style"] = AlignmentGeometryReader.ReadStyleName(profile, profile.StyleId, transaction).Name ?? string.Empty,
         ["layer"] = profile.Layer,
         ["startStation"] = profile.StartingStation,
         ["endStation"] = profile.EndingStation,
@@ -193,7 +191,7 @@ public static class ProfileCommands
     });
   }
 
-  private static Dictionary<string, object?> ToProfileSummary(Profile profile)
+  private static Dictionary<string, object?> ToProfileSummary(Profile profile, Transaction transaction)
   {
     var extents = GetElevationExtents(profile);
     return new Dictionary<string, object?>
@@ -202,7 +200,7 @@ public static class ProfileCommands
       ["handle"] = CivilObjectUtils.GetHandle(profile),
       ["type"] = MapProfileType(profile.ProfileType.ToString()),
       ["profileType"] = profile.ProfileType.ToString(),
-      ["style"] = AlignmentGeometryReader.TryRead(profile, "StyleName", out _) as string ?? string.Empty,
+      ["style"] = AlignmentGeometryReader.ReadStyleName(profile, profile.StyleId, transaction).Name ?? string.Empty,
       ["startStation"] = profile.StartingStation,
       ["endStation"] = profile.EndingStation,
       ["minElevation"] = extents.Min,

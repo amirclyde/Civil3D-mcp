@@ -21,7 +21,8 @@ public static class CivilObjectUtils
       return null;
     }
 
-    return Civil3DCompatibility.GetPropertyValue(value, "Name")?.ToString();
+    var name = Civil3DCompatibility.GetPropertyValue(value, "Name")?.ToString();
+    return !string.IsNullOrEmpty(name) ? name : Civil3DCompatibility.TryReadName(value, out _);
   }
 
   public static string? GetStringProperty(object? value, string propertyName)

@@ -492,6 +492,102 @@ internal static class Civil3DCompatibility
     return values;
   }
 
+  // Civil 3D style objects do not expose "Name" to plain GetProperty lookups (live-tested on
+  // 2026: every style name came back null). Try the other ways a name can be published, cache
+  // whichever works per type, and describe what exists when nothing does.
+  private static readonly ConcurrentDictionary<Type, Func<object, object?>?> NameAccessorCache = new();
+
+  public static string? TryReadName(object? target, out string? diagnostics)
+  {
+    diagnostics = null;
+    if (target == null)
+    {
+      return null;
+    }
+
+    var type = target.GetType();
+    if (NameAccessorCache.TryGetValue(type, out var cached) && cached != null)
+    {
+      try
+      {
+        if (cached(target) is string cachedName && !string.IsNullOrEmpty(cachedName))
+        {
+          return cachedName;
+        }
+      }
+      catch
+      {
+        // Fall through to a full search; the object may be in a state the cached accessor rejects.
+      }
+    }
+
+    var attempts = new List<string>();
+    foreach (var (label, accessor) in EnumerateNameAccessors(type))
+    {
+      try
+      {
+        if (accessor(target) is string name && !string.IsNullOrEmpty(name))
+        {
+          NameAccessorCache[type] = accessor;
+          return name;
+        }
+
+        attempts.Add($"{label}: empty");
+      }
+      catch (Exception ex)
+      {
+        attempts.Add($"{label}: {DescribeException(ex)}");
+      }
+    }
+
+    var nameLikeMembers = type
+      .GetMembers(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.FlattenHierarchy)
+      .Where(member => member.Name.IndexOf("name", StringComparison.OrdinalIgnoreCase) >= 0)
+      .Select(member => $"{member.MemberType}:{member.DeclaringType?.Name}.{member.Name}")
+      .Distinct()
+      .Take(30);
+    diagnostics = $"{type.FullName} | tried: {(attempts.Count > 0 ? string.Join("; ", attempts) : "no accessors found")} " +
+      $"| name-like members: {string.Join(", ", nameLikeMembers)}";
+    return null;
+  }
+
+  private static IEnumerable<(string Label, Func<object, object?> Accessor)> EnumerateNameAccessors(Type type)
+  {
+    var publicProperty = FindMostDerivedProperty(type, "Name");
+    if (publicProperty != null)
+    {
+      yield return ($"public {publicProperty.DeclaringType?.Name}.Name", target => publicProperty.GetValue(target));
+    }
+
+    const BindingFlags declaredInstance =
+      BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly;
+    for (var current = type; current != null && current != typeof(object); current = current.BaseType)
+    {
+      var getter = current.GetMethod("get_Name", declaredInstance, null, Type.EmptyTypes, null);
+      if (getter != null)
+      {
+        yield return ($"{current.Name}.get_Name()", target => getter.Invoke(target, null));
+      }
+
+      foreach (var property in current.GetProperties(declaredInstance)
+        .Where(property => property.CanRead
+          && property.GetIndexParameters().Length == 0
+          && property.Name.EndsWith(".Name", StringComparison.Ordinal)))
+      {
+        yield return ($"{current.Name}.{property.Name}", target => property.GetValue(target));
+      }
+    }
+
+    foreach (var implemented in type.GetInterfaces())
+    {
+      var interfaceProperty = implemented.GetProperty("Name");
+      if (interfaceProperty != null && interfaceProperty.CanRead && interfaceProperty.GetIndexParameters().Length == 0)
+      {
+        yield return ($"{implemented.Name}.Name", target => interfaceProperty.GetValue(target));
+      }
+    }
+  }
+
   public static string DescribeException(Exception ex)
   {
     var inner = ex is TargetInvocationException { InnerException: not null } ? ex.InnerException! : ex;

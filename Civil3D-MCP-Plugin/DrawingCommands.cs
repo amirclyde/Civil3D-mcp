@@ -78,13 +78,19 @@ public static class DrawingCommands
     {
       var currentLayer = CivilObjectUtils.GetRequiredObject<LayerTableRecord>(transaction, database.Clayer, OpenMode.ForRead);
       var coords = ReadCoordinateSystemFields(civilDoc);
+      var transformation = ReadTransformationScale(civilDoc);
 
       return new Dictionary<string, object?>
       {
         ["coordinateSystem"] = coords.code,
         ["coordinateZone"] = coords.zone,
         ["datum"] = coords.datum,
-        ["scaleFactor"] = Convert.ToDouble(App.GetSystemVariable("DIMSCALE") ?? 1d),
+        // DIMSCALE is AutoCAD's dimension scale, not a coordinate/grid scale factor. It was
+        // previously reported as "scaleFactor", which invites misuse on survey coordinates.
+        ["dimensionScale"] = Convert.ToDouble(App.GetSystemVariable("DIMSCALE") ?? 1d),
+        ["gridScaleFactor"] = transformation.ScaleFactor,
+        ["useGridScaleFactor"] = transformation.UseScaleFactor,
+        ["diagnostics"] = transformation.Diagnostics,
         ["elevationReference"] = coords.verticalDatum,
         ["defaultLayer"] = currentLayer.Name,
         ["defaultStyles"] = new Dictionary<string, object?>
@@ -293,6 +299,57 @@ public static class DrawingCommands
     }
 
     return count;
+  }
+
+  // Grid (transformation) scale factor from Drawing Settings > Transformation. Read through the
+  // compatibility boundary because the member names are not referenced elsewhere in the plugin.
+  private static (double? ScaleFactor, bool? UseScaleFactor, string? Diagnostics) ReadTransformationScale(CivilDocument civilDoc)
+  {
+    try
+    {
+      var transformation = Civil3DCompatibility.TryReadProperty(
+        civilDoc.Settings.DrawingSettings, "TransformationSettings", out var transformationError);
+      if (transformation == null)
+      {
+        return (null, null, $"TransformationSettings: {transformationError}");
+      }
+
+      var scale = ReadSettingValue(transformation, "ScaleFactor", "GridScaleFactor");
+      var use = ReadSettingValue(transformation, "UseScaleFactor", "ApplyScaleFactor");
+      double? scaleFactor = scale is double or float or int ? Convert.ToDouble(scale) : null;
+      bool? useScaleFactor = use is bool flag ? flag : null;
+      if (scaleFactor != null)
+      {
+        return (scaleFactor, useScaleFactor, null);
+      }
+
+      var available = string.Join(", ", Civil3DCompatibility
+        .ReadAllPropertiesForReport(transformation, new Dictionary<string, string>())
+        .Keys.Take(30));
+      return (null, useScaleFactor, $"grid scale factor not found; transformation settings expose: {available}");
+    }
+    catch (System.Exception ex)
+    {
+      return (null, null, $"transformation settings: {Civil3DCompatibility.DescribeException(ex)}");
+    }
+  }
+
+  private static object? ReadSettingValue(object settings, params string[] names)
+  {
+    foreach (var name in names)
+    {
+      var value = Civil3DCompatibility.TryReadProperty(settings, name, out _);
+      if (value == null)
+      {
+        continue;
+      }
+
+      // Civil 3D settings are often wrappers (e.g. SettingsDouble) holding the value in "Value".
+      var inner = Civil3DCompatibility.TryReadProperty(value, "Value", out _);
+      return inner ?? value;
+    }
+
+    return null;
   }
 
   // Single-field coordinate system code (for getDrawingInfo).

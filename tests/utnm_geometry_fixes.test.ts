@@ -13,7 +13,7 @@ function responseSchema(toolName: string, action: string) {
 describe("drawing settings contract", () => {
   it("accepts the null styles the plugin sends (corridor style is always null)", () => {
     const pluginResponse = {
-      coordinateSystem: "MAL-MSEL", coordinateZone: null, datum: null, scaleFactor: 1, elevationReference: null,
+      coordinateSystem: "MAL-MSEL", coordinateZone: null, datum: null, dimensionScale: 0.25, gridScaleFactor: null, useGridScaleFactor: null, elevationReference: null,
       defaultLayer: "0",
       defaultStyles: { surface: "Standard", alignment: "Standard", profile: "Standard", corridor: null, pipeNetwork: null },
     };

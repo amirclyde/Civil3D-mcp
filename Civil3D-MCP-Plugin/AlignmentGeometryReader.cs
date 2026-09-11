@@ -92,10 +92,11 @@ internal static class AlignmentGeometryReader
     }
 
     var errors = new Dictionary<string, string>();
+    var suppressed = 0;
     result["clrType"] = row.Entity.GetType().Name;
     result["start"] = PointAt(alignment, row.StartStation);
     result["end"] = PointAt(alignment, row.EndStation);
-    result["properties"] = DumpProperties(row.Entity, errors);
+    result["properties"] = CleanReport(DumpProperties(row.Entity, errors), errors, ref suppressed);
 
     var subEntityCount = ToInt(TryRead(row.Entity, "SubEntityCount", out var countError));
     if (countError != null)
@@ -115,11 +116,12 @@ internal static class AlignmentGeometryReader
       }
 
       var subErrors = new Dictionary<string, string>();
+      var subProperties = CleanReport(DumpProperties(subEntity, subErrors), subErrors, ref suppressed);
       subEntities.Add(new Dictionary<string, object?>
       {
         ["index"] = i,
         ["clrType"] = subEntity.GetType().Name,
-        ["properties"] = DumpProperties(subEntity, subErrors),
+        ["properties"] = subProperties,
         ["errors"] = subErrors.Count > 0 ? subErrors : null,
       });
     }
@@ -130,31 +132,83 @@ internal static class AlignmentGeometryReader
       result["errors"] = errors;
     }
 
+    if (suppressed > 0)
+    {
+      result["suppressedReads"] = suppressed;
+    }
+
     return result;
   }
 
-  internal static (string? Name, string? Error) ReadStyleName(Alignment alignment, Transaction transaction)
+  // Values that carry no geometry (wrapper plumbing, neighbour links, empty group indices).
+  private static readonly HashSet<string> NoiseProperties = new(StringComparer.Ordinal)
   {
-    var styleName = TryRead(alignment, "StyleName", out var styleNameError) as string;
-    if (!string.IsNullOrWhiteSpace(styleName))
+    "AutoDelete", "IsDisposed", "UnmanagedObject", "CurveGroupIndex", "CurveGroupSubEntityIndex",
+    "EntityBefore", "EntityAfter",
+  };
+
+  /// <summary>
+  /// Removes report noise found in live Civil 3D 2026 output: wrapper plumbing, placeholder values
+  /// for objects already reported as sub-entities, and reads that are expected to fail — getters
+  /// such as DirectionAtPoint1 or PassThroughPoint2 throw "Invalid Operation" on free/floating
+  /// arcs, and EntityBefore/EntityAfter throw at the ends of the alignment.
+  /// </summary>
+  internal static Dictionary<string, object?> CleanReport(
+    Dictionary<string, object?> properties,
+    Dictionary<string, string> errors,
+    ref int suppressed)
+  {
+    var cleaned = new Dictionary<string, object?>(StringComparer.Ordinal);
+    foreach (var (name, value) in properties)
+    {
+      if (NoiseProperties.Contains(name)
+        || value is string text && (text.Length == 0 || (text.StartsWith("<", StringComparison.Ordinal) && text.EndsWith(">", StringComparison.Ordinal))))
+      {
+        continue;
+      }
+
+      cleaned[name] = value;
+    }
+
+    foreach (var name in errors.Keys.ToList())
+    {
+      var message = errors[name];
+      if (NoiseProperties.Contains(name)
+        || message.StartsWith("InvalidOperationException", StringComparison.Ordinal)
+        || message.StartsWith("EntityNotFoundException", StringComparison.Ordinal))
+      {
+        errors.Remove(name);
+        suppressed++;
+      }
+    }
+
+    return cleaned;
+  }
+
+  internal static (string? Name, string? Error) ReadStyleName(Alignment alignment, Transaction transaction)
+    => ReadStyleName(alignment, alignment.StyleId, transaction);
+
+  internal static (string? Name, string? Error) ReadStyleName(object entity, ObjectId styleId, Transaction transaction)
+  {
+    if (TryRead(entity, "StyleName", out _) is string styleName && !string.IsNullOrWhiteSpace(styleName))
     {
       return (styleName, null);
     }
 
+    if (styleId.IsNull)
+    {
+      return (null, "no style assigned");
+    }
+
     try
     {
-      var style = transaction.GetObject(alignment.StyleId, OpenMode.ForRead);
-      var name = TryRead(style, "Name", out var nameError) as string;
-      if (!string.IsNullOrWhiteSpace(name))
-      {
-        return (name, null);
-      }
-
-      return (null, $"StyleName: {styleNameError ?? "empty"}; {style.GetType().Name}.Name: {nameError ?? "empty"}");
+      var style = transaction.GetObject(styleId, OpenMode.ForRead);
+      var name = Civil3DCompatibility.TryReadName(style, out var diagnostics);
+      return string.IsNullOrWhiteSpace(name) ? (null, diagnostics) : (name, null);
     }
     catch (System.Exception ex)
     {
-      return (null, $"StyleName: {styleNameError ?? "empty"}; style lookup: {Describe(ex)}");
+      return (null, $"style lookup: {Describe(ex)}");
     }
   }
 
