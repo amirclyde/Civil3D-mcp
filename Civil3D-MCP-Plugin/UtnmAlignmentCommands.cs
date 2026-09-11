@@ -15,6 +15,22 @@ namespace Civil3DMcpPlugin;
 /// </summary>
 public static class UtnmAlignmentCommands
 {
+  // utnmCreateAlignmentFromPis — see UtnmAlignmentBuilder. dryRun defaults to true: build, verify,
+  // then roll back. A real run commits only if every IP verifies.
+  public static Task<object?> CreateAlignmentFromPisAsync(JsonObject? parameters)
+  {
+    var specNode = PluginRuntime.GetParameter(parameters, "spec") as JsonObject
+      ?? throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "Parameter 'spec' is required. No alignment was created.");
+    var dryRun = PluginRuntime.GetOptionalBool(parameters, "dryRun") ?? true;
+    var tolerance = PluginRuntime.GetOptionalDouble(parameters, "tolerance") ?? 0.001;
+    var spec = UtnmAlignmentSpec.Parse(specNode);
+
+    return CivilExecution.ExecuteAsync<object?>(
+      (doc, civilDoc, database, transaction) =>
+        UtnmAlignmentBuilder.Build(civilDoc, database, transaction, spec, dryRun, tolerance),
+      write: !dryRun);
+  }
+
   public static Task<object?> GetAlignmentGeometryAsync(JsonObject? parameters)
   {
     var name = PluginRuntime.GetRequiredString(parameters, "name");

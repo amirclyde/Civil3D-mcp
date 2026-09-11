@@ -481,7 +481,7 @@ internal static class Civil3DCompatibility
 
       try
       {
-        values[property.Name] = ToReportValue(property.GetValue(target));
+        values[property.Name] = ConvertForReport(property.GetValue(target));
       }
       catch (Exception ex)
       {
@@ -588,6 +588,165 @@ internal static class Civil3DCompatibility
     }
   }
 
+  // ─── Overload-tolerant invocation (added for the UTNM alignment builder) ─────
+  // Calls an API method by matching argument *shapes* against the overloads that actually exist at
+  // runtime. Enum parameters accept names ("Radius", "Compound|Reverse|*" where * = first value).
+  // If nothing matches, the error lists every real overload with enum members, so a signature
+  // difference in a Civil 3D release shows up as a readable message instead of a compile failure.
+
+  public static object? InvokeMatchingOverload(object? target, Type? staticType, string methodName, object?[] arguments, out string? error)
+  {
+    error = null;
+    var type = target?.GetType() ?? staticType;
+    if (type == null)
+    {
+      error = "no target or type";
+      return null;
+    }
+
+    var flags = BindingFlags.Public | (target == null ? BindingFlags.Static : BindingFlags.Instance);
+    foreach (var method in type.GetMethods(flags)
+      .Where(method => method.Name == methodName && method.GetParameters().Length == arguments.Length))
+    {
+      var parameters = method.GetParameters();
+      var converted = new object?[arguments.Length];
+      var matches = true;
+      for (var i = 0; i < parameters.Length && matches; i++)
+      {
+        matches = TryConvertArgument(arguments[i], parameters[i].ParameterType, out converted[i]);
+      }
+
+      if (!matches)
+      {
+        continue;
+      }
+
+      try
+      {
+        return method.Invoke(target, converted);
+      }
+      catch (Exception ex)
+      {
+        error = DescribeException(ex);
+        return null;
+      }
+    }
+
+    error = $"no overload of {type.Name}.{methodName} accepts ({string.Join(", ", arguments.Select(argument => argument?.GetType().Name ?? "null"))}). " +
+      $"Available: {DescribeOverloads(type, methodName, flags)}";
+    return null;
+  }
+
+  public static bool TrySetPropertyValue(object? target, string propertyName, object? value, out string? error)
+  {
+    error = null;
+    if (target == null)
+    {
+      error = "target is null";
+      return false;
+    }
+
+    const BindingFlags declaredInstance =
+      BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly;
+    for (var current = target.GetType(); current != null && current != typeof(object); current = current.BaseType)
+    {
+      var property = current.GetProperty(propertyName, declaredInstance);
+      var setter = property?.GetSetMethod(nonPublic: true) ?? current.GetMethod($"set_{propertyName}", declaredInstance);
+      if (setter == null)
+      {
+        continue;
+      }
+
+      var parameterType = setter.GetParameters().FirstOrDefault()?.ParameterType;
+      if (parameterType == null || !TryConvertArgument(value, parameterType, out var converted))
+      {
+        error = $"{current.Name}.{propertyName} does not accept {value?.GetType().Name ?? "null"}";
+        return false;
+      }
+
+      try
+      {
+        setter.Invoke(target, new[] { converted });
+        return true;
+      }
+      catch (Exception ex)
+      {
+        error = DescribeException(ex);
+        return false;
+      }
+    }
+
+    error = "no setter found";
+    return false;
+  }
+
+  private static bool TryConvertArgument(object? argument, Type parameterType, out object? converted)
+  {
+    converted = null;
+    var targetType = Nullable.GetUnderlyingType(parameterType) ?? parameterType;
+    if (argument == null)
+    {
+      return !parameterType.IsValueType || Nullable.GetUnderlyingType(parameterType) != null;
+    }
+
+    if (targetType.IsInstanceOfType(argument))
+    {
+      converted = argument;
+      return true;
+    }
+
+    if (targetType.IsEnum && argument is string enumNames)
+    {
+      foreach (var candidate in enumNames.Split('|'))
+      {
+        if (candidate == "*")
+        {
+          var values = Enum.GetValues(targetType);
+          if (values.Length > 0)
+          {
+            converted = values.GetValue(0);
+            return true;
+          }
+        }
+        else if (Enum.TryParse(targetType, candidate, ignoreCase: true, out var parsed))
+        {
+          converted = parsed;
+          return true;
+        }
+      }
+
+      return false;
+    }
+
+    if ((targetType == typeof(double) || targetType == typeof(float) || targetType == typeof(int))
+      && argument is double or float or int or long)
+    {
+      if (targetType == typeof(int) && argument is double or float)
+      {
+        return false;
+      }
+
+      converted = Convert.ChangeType(argument, targetType);
+      return true;
+    }
+
+    return false;
+  }
+
+  private static string DescribeOverloads(Type type, string methodName, BindingFlags flags)
+  {
+    var overloads = type.GetMethods(flags)
+      .Where(method => method.Name == methodName)
+      .Select(method => $"{method.Name}(" + string.Join(", ", method.GetParameters().Select(parameter =>
+      {
+        var parameterType = parameter.ParameterType;
+        var enumMembers = parameterType.IsEnum ? "{" + string.Join("|", Enum.GetNames(parameterType)) + "}" : string.Empty;
+        return $"{parameterType.Name}{enumMembers} {parameter.Name}";
+      })) + ")")
+      .ToList();
+    return overloads.Count > 0 ? string.Join(" ; ", overloads) : "none";
+  }
+
   public static string DescribeException(Exception ex)
   {
     var inner = ex is TargetInvocationException { InnerException: not null } ? ex.InnerException! : ex;
@@ -614,7 +773,7 @@ internal static class Civil3DCompatibility
     return depth;
   }
 
-  private static object? ToReportValue(object? value)
+  public static object? ConvertForReport(object? value)
   {
     switch (value)
     {
@@ -643,7 +802,7 @@ internal static class Civil3DCompatibility
         var axisProperty = type.GetProperty(axis, BindingFlags.Public | BindingFlags.Instance);
         if (axisProperty != null)
         {
-          axes[axis.ToLowerInvariant()] = ToReportValue(axisProperty.GetValue(value));
+          axes[axis.ToLowerInvariant()] = ConvertForReport(axisProperty.GetValue(value));
         }
       }
 

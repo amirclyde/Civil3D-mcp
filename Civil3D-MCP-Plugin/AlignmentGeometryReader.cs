@@ -242,6 +242,21 @@ internal static class AlignmentGeometryReader
     }
   }
 
+  internal static List<object> ReadSubEntities(object entity)
+  {
+    var subEntities = new List<object>();
+    var count = ToInt(TryRead(entity, "SubEntityCount", out _)) ?? 0;
+    for (var i = 0; i < count; i++)
+    {
+      if (ReadSubEntity(entity, i, out _) is { } subEntity)
+      {
+        subEntities.Add(subEntity);
+      }
+    }
+
+    return subEntities;
+  }
+
   internal static object? TryRead(object? target, string propertyName, out string? error)
     => Civil3DCompatibility.TryReadProperty(target, propertyName, out error);
 

@@ -53,6 +53,7 @@ public static class CommandDispatcher
       "deleteAlignment" => AlignmentCommands.DeleteAlignmentAsync(parameters),
       // UTNM additions (see UtnmAlignmentCommands.cs)
       "utnmGetAlignmentGeometry" => UtnmAlignmentCommands.GetAlignmentGeometryAsync(parameters),
+      "utnmCreateAlignmentFromPis" => UtnmAlignmentCommands.CreateAlignmentFromPisAsync(parameters),
       "listProfiles" => ProfileCommands.ListProfilesAsync(parameters),
       "getProfile" => ProfileCommands.GetProfileAsync(parameters),
       "getProfileElevation" => ProfileCommands.GetProfileElevationAsync(parameters),
