@@ -1,6 +1,7 @@
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using Autodesk.AutoCAD.ApplicationServices;
+using Autodesk.AutoCAD.Colors;
 using Autodesk.AutoCAD.DatabaseServices;
 using Autodesk.AutoCAD.Geometry;
 using Autodesk.Civil.ApplicationServices;
@@ -13,6 +14,7 @@ namespace Civil3DMcpPlugin;
 ///
 /// Construction (proven on a live Civil 3D 2026 drawing, where a free spiral-curve-spiral sits
 /// between two fixed straights):
+///   0. optionally a new layer (created inside the same transaction, so it disappears with a rollback)
 ///   1. Alignment.Create (siteless unless a site is named)
 ///   2. a fixed line between every pair of consecutive points (BP, IPs, EP)
 ///   3. at each IP with a curve, a free curve group between the two lines meeting there
@@ -49,7 +51,9 @@ internal static class UtnmAlignmentBuilder
         $"Alignment name '{spec.Name}' {nameProblem}");
     }
 
-    var layerId = ResolveLayer(database, transaction, spec.Layer, warnings);
+    var layerId = spec.CreateLayer
+      ? CreateLayer(database, transaction, spec.Layer, spec.LayerColor)
+      : ResolveLayer(database, transaction, spec.Layer, warnings);
     var siteId = ResolveSite(civilDoc, transaction, spec.Site);
     var styleId = ResolveNamed(transaction, LookupUtils.GetAlignmentStyleId(civilDoc, transaction, spec.Style), spec.Style, "alignment style",
       () => civilDoc.Styles.AlignmentStyles.Cast<ObjectId>());
@@ -158,6 +162,8 @@ internal static class UtnmAlignmentBuilder
       ["length"] = alignment.Length,
       ["style"] = CivilObjectUtils.GetName(transaction.GetObject(alignment.StyleId, OpenMode.ForRead)),
       ["layer"] = alignment.Layer,
+      ["layerCreated"] = spec.CreateLayer,
+      ["layerColor"] = spec.CreateLayer ? spec.LayerColor : null,
       ["ips"] = verification,
       ["entities"] = AlignmentGeometryReader.ReadEntities(alignment)
         .Select((row, order) => AlignmentGeometryReader.DescribeEntity(alignment, row, order, detailed: false))
@@ -374,6 +380,39 @@ internal static class UtnmAlignmentBuilder
     return layerId;
   }
 
+  // The user asked for a new layer. It is added inside the build transaction, so a dry run or a
+  // failed build rolls it back together with the alignment. An existing layer is never reused
+  // silently: the user must pick it from the list instead.
+  private static ObjectId CreateLayer(Database database, Transaction transaction, string? layerName, int? colorIndex)
+  {
+    var problem = UtnmLayerNameRules.Problem(layerName);
+    if (problem != null)
+    {
+      throw Invalid("CIVIL3D.INVALID_INPUT", $"New layer name '{layerName}' {problem}");
+    }
+
+    if (colorIndex is null or < UtnmLayerNameRules.MinColorIndex or > UtnmLayerNameRules.MaxColorIndex)
+    {
+      throw Invalid("CIVIL3D.INVALID_INPUT",
+        $"A colour index between {UtnmLayerNameRules.MinColorIndex} and {UtnmLayerNameRules.MaxColorIndex} must be chosen for the new layer '{layerName}'.");
+    }
+
+    var layerTable = CivilObjectUtils.GetRequiredObject<LayerTable>(transaction, database.LayerTableId, OpenMode.ForWrite);
+    if (layerTable.Has(layerName!))
+    {
+      throw Invalid("CIVIL3D.CONFLICT", $"Layer '{layerName}' already exists; select it from the layer list instead of creating it.");
+    }
+
+    var layer = new LayerTableRecord
+    {
+      Name = layerName!,
+      Color = Color.FromColorIndex(ColorMethod.ByAci, (short)colorIndex.Value),
+    };
+    var layerId = layerTable.Add(layer);
+    transaction.AddNewlyCreatedDBObject(layer, true);
+    return layerId;
+  }
+
   private static ObjectId ResolveSite(CivilDocument civilDoc, Transaction transaction, string? siteName)
   {
     if (string.IsNullOrWhiteSpace(siteName))
@@ -427,6 +466,8 @@ internal sealed class UtnmAlignmentSpec
 {
   public string Name { get; private init; } = "";
   public string? Layer { get; private init; }
+  public bool CreateLayer { get; private init; }
+  public int? LayerColor { get; private init; }
   public string? Style { get; private init; }
   public string? LabelSet { get; private init; }
   public string? Site { get; private init; }
@@ -457,11 +498,27 @@ internal sealed class UtnmAlignmentSpec
       }
     }
 
+    var createLayer = Bool(alignment["create_layer"]) ?? false;
+    var layerColor = Number(alignment["layer_color"]) is { } colorValue ? (int?)(int)Math.Round(colorValue) : null;
+    if (createLayer)
+    {
+      var layerProblem = UtnmLayerNameRules.Problem(Text(alignment["layer"]));
+      if (layerProblem != null) Fail($"New layer name '{Text(alignment["layer"])}' {layerProblem}");
+      if (layerColor is null) Fail("alignment.layer_color is required when create_layer is true: the user must choose the new layer's colour.");
+    }
+
+    if (layerColor is < UtnmLayerNameRules.MinColorIndex or > UtnmLayerNameRules.MaxColorIndex)
+    {
+      Fail($"alignment.layer_color must be an AutoCAD colour index between {UtnmLayerNameRules.MinColorIndex} and {UtnmLayerNameRules.MaxColorIndex}.");
+    }
+
     var source = node["source"] as JsonObject;
     var spec = new UtnmAlignmentSpec
     {
       Name = Text(alignment["name"]) is { Length: > 0 } name ? name : throw Error("alignment.name is required."),
       Layer = Text(alignment["layer"]),
+      CreateLayer = createLayer,
+      LayerColor = createLayer ? layerColor : null,
       Style = Text(alignment["style"]),
       LabelSet = Text(alignment["label_set"]),
       Site = Text(alignment["site"]),
@@ -563,6 +620,45 @@ internal static class UtnmNameRules
   }
 }
 
+/// <summary>
+/// Rules for a new layer name (AutoCAD symbol-table names). Mirrored in utnmAlignmentDomain.ts and
+/// returned by build_options. Existence is checked in Civil 3D: a new layer must not exist yet.
+/// </summary>
+internal static class UtnmLayerNameRules
+{
+  public const int MaxLength = 255;
+  public const string InvalidCharacters = "<>/\\\":;?*|,=`";
+  public const int MinColorIndex = 1;
+  public const int MaxColorIndex = 255;
+
+  /// <summary>Returns null when the name is acceptable, otherwise the reason (a sentence fragment).</summary>
+  public static string? Problem(string? name)
+  {
+    if (string.IsNullOrWhiteSpace(name))
+    {
+      return "is required.";
+    }
+
+    if (name != name.Trim())
+    {
+      return "must not start or end with spaces.";
+    }
+
+    if (name.Length > MaxLength)
+    {
+      return $"is longer than {MaxLength} characters.";
+    }
+
+    var invalid = name.Where(character => InvalidCharacters.Contains(character) || char.IsControl(character)).Distinct().ToArray();
+    if (invalid.Length > 0)
+    {
+      return $"contains characters that are not allowed: {string.Join(" ", invalid.Select(character => char.IsControl(character) ? "(control)" : character.ToString()))}";
+    }
+
+    return null;
+  }
+}
+
 /// <summary>Choices offered to the user before a build, read from the open drawing.</summary>
 internal static class UtnmBuildOptions
 {
@@ -618,6 +714,13 @@ internal static class UtnmBuildOptions
         ["invalidCharacters"] = UtnmNameRules.InvalidCharacters,
         ["rejectDefaultPlaceholder"] = "Alignment - (n)",
         ["unique"] = true,
+      },
+      ["layerNameRules"] = new Dictionary<string, object?>
+      {
+        ["maxLength"] = UtnmLayerNameRules.MaxLength,
+        ["invalidCharacters"] = UtnmLayerNameRules.InvalidCharacters,
+        ["mustNotExist"] = true,
+        ["colorIndexRange"] = new[] { UtnmLayerNameRules.MinColorIndex, UtnmLayerNameRules.MaxColorIndex },
       },
     };
   }

@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { AlignmentSpecSchema, UTNM_ALIGNMENT_DOMAIN_DEFINITION, alignmentNameProblem } from "../src/tools/domains/utnmAlignmentDomain.js";
+import {
+  AlignmentSpecSchema, UTNM_ALIGNMENT_DOMAIN_DEFINITION, alignmentNameProblem, layerNameProblem,
+} from "../src/tools/domains/utnmAlignmentDomain.js";
 import { hasApprovalRisk } from "../src/tools/approvalPolicy.js";
 import { findManifestAction } from "../src/tools/toolManifest.js";
 
@@ -70,6 +72,53 @@ describe("user selections and alignment names", () => {
       const result = AlignmentSpecSchema.safeParse(spec);
       expect(result.success, field).toBe(false);
     }
+  });
+
+  it("defaults create_layer to false and keeps an existing-layer spec unchanged", () => {
+    const parsed = AlignmentSpecSchema.parse(baseSpec());
+    expect(parsed.alignment.create_layer).toBe(false);
+    expect(parsed.alignment.layer_color).toBeUndefined();
+  });
+
+  it("accepts a new layer only with a valid name and a colour index", () => {
+    const good = baseSpec();
+    good.alignment.create_layer = true;
+    good.alignment.layer = "C-ROAD-UTNM";
+    good.alignment.layer_color = 3;
+    expect(AlignmentSpecSchema.safeParse(good).success).toBe(true);
+
+    const noColour = baseSpec();
+    noColour.alignment.create_layer = true;
+    noColour.alignment.layer = "C-ROAD-UTNM";
+    const noColourResult = AlignmentSpecSchema.safeParse(noColour);
+    expect(noColourResult.success).toBe(false);
+    expect(JSON.stringify(noColourResult.success ? null : noColourResult.error.issues)).toMatch(/colour index/);
+
+    for (const colour of [0, 256, 2.5, -1]) {
+      const bad = baseSpec();
+      bad.alignment.create_layer = true;
+      bad.alignment.layer = "C-ROAD-UTNM";
+      bad.alignment.layer_color = colour;
+      expect(AlignmentSpecSchema.safeParse(bad).success, `colour ${colour}`).toBe(false);
+    }
+
+    const badName = baseSpec();
+    badName.alignment.create_layer = true;
+    badName.alignment.layer = "C-ROAD,UTNM";
+    badName.alignment.layer_color = 3;
+    expect(AlignmentSpecSchema.safeParse(badName).success).toBe(false);
+  });
+
+  it("applies AutoCAD layer name rules to new layers", () => {
+    for (const name of ["C-ROAD-UTNM", "1-road align", "SOLIDS - Design Road (1) - MarkLink", "A_B.C+D"]) {
+      expect(layerNameProblem(name), name).toBeNull();
+    }
+    expect(layerNameProblem("")).toMatch(/required/);
+    expect(layerNameProblem(" C-ROAD")).toMatch(/spaces/);
+    expect(layerNameProblem("x".repeat(256))).toMatch(/longer than 255/);
+    expect(layerNameProblem("C,ROAD")).toMatch(/not allowed: ,/);
+    expect(layerNameProblem("C=ROAD`")).toMatch(/not allowed/);
+    expect(layerNameProblem("C/ROAD")).toMatch(/not allowed/);
   });
 
   it("treats site as optional (null means siteless)", () => {

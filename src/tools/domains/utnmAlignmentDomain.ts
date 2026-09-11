@@ -30,6 +30,28 @@ export function alignmentNameProblem(name: string): string | null {
   return null;
 }
 
+// ─── New layer name rules (mirrors UtnmLayerNameRules in UtnmAlignmentBuilder.cs) ─────
+
+export const LAYER_NAME_RULES = {
+  maxLength: 255,
+  invalidCharacters: "<>/\\\":;?*|,=`",
+  colorIndexRange: [1, 255],
+} as const;
+
+/** Returns null when a new layer name is acceptable, otherwise the reason. Existence is checked in Civil 3D. */
+export function layerNameProblem(name: string): string | null {
+  if (name.trim().length === 0) return "is required.";
+  if (name !== name.trim()) return "must not start or end with spaces.";
+  if (name.length > LAYER_NAME_RULES.maxLength) return `is longer than ${LAYER_NAME_RULES.maxLength} characters.`;
+  const invalid = [...new Set([...name].filter((character) =>
+    LAYER_NAME_RULES.invalidCharacters.includes(character) || /[\u0000-\u001f\u007f]/.test(character)))];
+  if (invalid.length > 0) {
+    const shown = invalid.map((character) => (/[\u0000-\u001f\u007f]/.test(character) ? "(control)" : character));
+    return `contains characters that are not allowed: ${shown.join(" ")}`;
+  }
+  return null;
+}
+
 // ─── Alignment spec v0.1 (contract between the skill and the builder) ─────────
 
 const CurveSchema = z.discriminatedUnion("kind", [
@@ -73,6 +95,10 @@ export const AlignmentSpecSchema = z
       spiral_type: z.literal("Clothoid").default("Clothoid"),
       // Chosen by the user from build_options; there are no silent defaults.
       layer: z.string().min(1, "A layer must be selected."),
+      // true: 'layer' names a layer that does not exist yet; it is created inside the build
+      // transaction with 'layer_color' (AutoCAD colour index) and rolled back with a dry run.
+      create_layer: z.boolean().default(false),
+      layer_color: z.number().int().min(LAYER_NAME_RULES.colorIndexRange[0]).max(LAYER_NAME_RULES.colorIndexRange[1]).optional(),
       style: z.string().min(1, "An alignment style must be selected."),
       label_set: z.string().min(1, "An alignment label set must be selected."),
       site: z.string().min(1).nullable().default(null),
@@ -88,6 +114,18 @@ export const AlignmentSpecSchema = z
     }),
   })
   .superRefine((spec, ctx) => {
+    if (spec.alignment.create_layer) {
+      const layerProblem = layerNameProblem(spec.alignment.layer);
+      if (layerProblem) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["alignment", "layer"], message: `New layer name ${layerProblem}` });
+      }
+      if (spec.alignment.layer_color === undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom, path: ["alignment", "layer_color"],
+          message: "A colour index (1-255) must be chosen for the new layer.",
+        });
+      }
+    }
     const points = spec.points;
     if (points[0]?.role !== "start") {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["points", 0, "role"], message: "First point must have role 'start'." });
@@ -135,6 +173,7 @@ const BuildOptionsResponseSchema = z
     sites: z.array(z.string()),
     existingAlignmentNames: z.array(z.string()),
     nameRules: z.object({}).passthrough(),
+    layerNameRules: z.object({}).passthrough().optional(),
   })
   .passthrough();
 
@@ -238,8 +277,9 @@ export const UTNM_ALIGNMENT_DOMAIN_DEFINITION: DomainToolDefinition = {
       displayName: "UTNM Alignment",
       description:
         "UTNM alignment tools. 'build_options' (read-only): the drawing's layers (with usability), alignment styles, " +
-        "label sets, sites, existing alignment names and name rules - show these to the user as dropdowns and let the " +
-        "user choose; never pick layer/style/label set yourself. " +
+        "label sets, sites, existing alignment names and name/layer rules - show these to the user as dropdowns and let the " +
+        "user choose; never pick layer/style/label set yourself. The user may instead ask for a new layer " +
+        "(spec alignment.create_layer=true with layer_color 1-255); it is created inside the build transaction. " +
         "'geometry' (read-only, needs 'name'): every entity in station order with stations, " +
         "lengths, coordinates, Civil 3D entity types and sub-entity properties (radius, spiral length, A, PI...). " +
         "'validate_from_pis' (needs 'spec'): builds an alignment from an IP spec v0.1 with per-IP radius and spiral " +
