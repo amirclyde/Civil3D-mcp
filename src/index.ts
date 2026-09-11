@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { registerTools } from "./tools/register.js";
 import { startHttpBridge } from "./httpBridge.js";
+import { withToolSchemaCompat } from "./toolSchemaCompat.js";
 import { createLogger } from "./utils/logger.js";
 import { APP_VERSION } from "./version.js";
 
@@ -16,7 +17,7 @@ async function main() {
   await registerTools(server);
   const httpServer = startHttpBridge();
 
-  const transport = new StdioServerTransport();
+  const transport = withToolSchemaCompat(new StdioServerTransport());
   await server.connect(transport);
   log.info("Civil 3D MCP Server started");
 
