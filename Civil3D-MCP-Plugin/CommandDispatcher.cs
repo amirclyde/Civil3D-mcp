@@ -54,6 +54,7 @@ public static class CommandDispatcher
       // UTNM additions (see UtnmAlignmentCommands.cs)
       "utnmGetAlignmentGeometry" => UtnmAlignmentCommands.GetAlignmentGeometryAsync(parameters),
       "utnmCreateAlignmentFromPis" => UtnmAlignmentCommands.CreateAlignmentFromPisAsync(parameters),
+      "utnmGetBuildOptions" => UtnmAlignmentCommands.GetBuildOptionsAsync(parameters),
       "listProfiles" => ProfileCommands.ListProfilesAsync(parameters),
       "getProfile" => ProfileCommands.GetProfileAsync(parameters),
       "getProfileElevation" => ProfileCommands.GetProfileElevationAsync(parameters),

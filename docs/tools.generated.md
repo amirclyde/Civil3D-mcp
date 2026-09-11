@@ -200,7 +200,7 @@ Generated from the runtime manifest for civil3d-mcp 1.2.1. Do not edit by hand.
 | `civil3d_survey_figure_get` | survey | — | getSurveyFigure | yes |
 | `civil3d_survey_figure_list` | survey | — | listSurveyFigures | yes |
 | `civil3d_survey_observation_list` | survey | — | listSurveyObservations | yes |
-| `utnm_alignment` | utnm_alignment | geometry, validate_from_pis, create_from_pis | utnmGetAlignmentGeometry, utnmCreateAlignmentFromPis | no |
+| `utnm_alignment` | utnm_alignment | build_options, geometry, validate_from_pis, create_from_pis | utnmGetBuildOptions, utnmGetAlignmentGeometry, utnmCreateAlignmentFromPis | no |
 | `civil3d_workflow` | workflow | corridor_qc_report, grading_surface_volume, surface_comparison_report, data_shortcut_publish_sync, data_shortcut_reference_sync, project_startup, project_reference_setup, drawing_readiness_audit, feature_line_to_grading, pipe_network_design, plan_production_publish, qc_fix_and_verify | corridorQcReportWorkflow, calculateSurfaceVolume, surfaceComparisonReportWorkflow, dataShortcutPublishSyncWorkflow, dataShortcutReferenceSyncWorkflow, projectStartupWorkflow, projectReferenceSetupWorkflow, drawingReadinessAuditWorkflow, featureLineToGradingWorkflow, getPipeNetwork, listPipePartsCatalog, resizePipeInNetwork, analyzePipeNetworkHydraulics, planProductionPublishWorkflow, qcFixAndVerifyWorkflow | no |
 | `civil3d_workflow_corridor_qc_report` | workflow | — | corridorQcReportWorkflow | no |
 | `civil3d_workflow_data_shortcut_publish_sync` | workflow | — | dataShortcutPublishSyncWorkflow | no |

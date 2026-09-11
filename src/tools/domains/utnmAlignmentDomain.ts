@@ -5,6 +5,31 @@ import type { DomainToolDefinition } from "../domainRuntime.js";
 // UTNM additions for the c3d-alignment-from-ip skill. Kept in its own domain file so upstream
 // files only change by registration lines.
 
+// ─── Alignment name rules (mirrors UtnmNameRules in UtnmAlignmentBuilder.cs) ────
+
+export const ALIGNMENT_NAME_RULES = {
+  maxLength: 100,
+  invalidCharacters: "<>/\\\":;?*|=`",
+  defaultPlaceholder: /^alignment\s*-\s*\(\d+\)$/i,
+} as const;
+
+/** Returns null when the name is acceptable, otherwise the reason. Uniqueness is checked in Civil 3D. */
+export function alignmentNameProblem(name: string): string | null {
+  if (name.trim().length === 0) return "is required.";
+  if (name !== name.trim()) return "must not start or end with spaces.";
+  if (name.length > ALIGNMENT_NAME_RULES.maxLength) return `is longer than ${ALIGNMENT_NAME_RULES.maxLength} characters.`;
+  const invalid = [...new Set([...name].filter((character) =>
+    ALIGNMENT_NAME_RULES.invalidCharacters.includes(character) || /[\u0000-\u001f\u007f]/.test(character)))];
+  if (invalid.length > 0) {
+    const shown = invalid.map((character) => (/[\u0000-\u001f\u007f]/.test(character) ? "(control)" : character));
+    return `contains characters that are not allowed: ${shown.join(" ")}`;
+  }
+  if (ALIGNMENT_NAME_RULES.defaultPlaceholder.test(name)) {
+    return "is a Civil 3D default placeholder; enter a proper descriptive name.";
+  }
+  return null;
+}
+
 // ─── Alignment spec v0.1 (contract between the skill and the builder) ─────────
 
 const CurveSchema = z.discriminatedUnion("kind", [
@@ -39,14 +64,18 @@ export const AlignmentSpecSchema = z
       .passthrough(),
     coordinate_system: z.object({ name: z.string().min(1), units: z.literal("m") }),
     alignment: z.object({
-      name: z.string().min(1),
+      name: z.string().superRefine((name, ctx) => {
+        const problem = alignmentNameProblem(name);
+        if (problem) ctx.addIssue({ code: z.ZodIssueCode.custom, message: `Alignment name ${problem}` });
+      }),
       type: z.literal("Centerline").default("Centerline"),
       start_station: z.number().finite(),
       spiral_type: z.literal("Clothoid").default("Clothoid"),
-      site: z.string().nullable().optional(),
-      layer: z.string().nullable().optional(),
-      style: z.string().nullable().optional(),
-      label_set: z.string().nullable().optional(),
+      // Chosen by the user from build_options; there are no silent defaults.
+      layer: z.string().min(1, "A layer must be selected."),
+      style: z.string().min(1, "An alignment style must be selected."),
+      label_set: z.string().min(1, "An alignment label set must be selected."),
+      site: z.string().min(1).nullable().default(null),
       description: z.string().optional(),
     }),
     points: z.array(SpecPointSchema).min(2),
@@ -95,6 +124,20 @@ export const AlignmentSpecSchema = z
 
 // ─── Actions ───────────────────────────────────────────────────────────────────
 
+const BuildOptionsArgsSchema = z.object({ action: z.literal("build_options") });
+
+const BuildOptionsResponseSchema = z
+  .object({
+    currentLayer: z.string(),
+    layers: z.array(z.object({ name: z.string(), usable: z.boolean() }).passthrough()),
+    alignmentStyles: z.array(z.string()),
+    alignmentLabelSets: z.array(z.string()),
+    sites: z.array(z.string()),
+    existingAlignmentNames: z.array(z.string()),
+    nameRules: z.object({}).passthrough(),
+  })
+  .passthrough();
+
 const GeometryArgsSchema = z.object({
   action: z.literal("geometry").optional(),
   name: z.string().min(1),
@@ -141,6 +184,18 @@ const buildExecutor = (dryRun: boolean) => async (args: Record<string, unknown>)
 export const UTNM_ALIGNMENT_DOMAIN_DEFINITION: DomainToolDefinition = {
   domain: "utnm_alignment",
   actions: {
+    build_options: {
+      action: "build_options",
+      inputSchema: BuildOptionsArgsSchema,
+      responseSchema: BuildOptionsResponseSchema,
+      capabilities: ["query", "inspect"],
+      requiresActiveDrawing: true,
+      safeForRetry: true,
+      pluginMethods: ["utnmGetBuildOptions"],
+      execute: async () => await withApplicationConnection(
+        async (appClient) => await appClient.sendCommand("utnmGetBuildOptions", {}),
+      ),
+    },
     geometry: {
       action: "geometry",
       inputSchema: GeometryArgsSchema,
@@ -182,20 +237,23 @@ export const UTNM_ALIGNMENT_DOMAIN_DEFINITION: DomainToolDefinition = {
       toolName: "utnm_alignment",
       displayName: "UTNM Alignment",
       description:
-        "UTNM alignment tools. 'geometry' (read-only, needs 'name'): every entity in station order with stations, " +
+        "UTNM alignment tools. 'build_options' (read-only): the drawing's layers (with usability), alignment styles, " +
+        "label sets, sites, existing alignment names and name rules - show these to the user as dropdowns and let the " +
+        "user choose; never pick layer/style/label set yourself. " +
+        "'geometry' (read-only, needs 'name'): every entity in station order with stations, " +
         "lengths, coordinates, Civil 3D entity types and sub-entity properties (radius, spiral length, A, PI...). " +
         "'validate_from_pis' (needs 'spec'): builds an alignment from an IP spec v0.1 with per-IP radius and spiral " +
         "lengths, verifies every IP, then rolls back - the drawing is not changed. 'create_from_pis' (needs 'spec', " +
         "requires approval): same build, committed only if every IP verifies. Always run validate_from_pis first.",
       inputShape: {
-        action: z.enum(["geometry", "validate_from_pis", "create_from_pis"]).optional()
+        action: z.enum(["build_options", "geometry", "validate_from_pis", "create_from_pis"]).optional()
           .describe("Defaults to 'geometry'."),
         name: z.string().optional().describe("Alignment name (required for 'geometry')."),
         spec: AlignmentSpecSchema.optional().describe("IP alignment spec v0.1 (required for validate/create)."),
         tolerance: z.number().positive().max(1).optional()
           .describe("Verification tolerance in metres for validate/create. Default 0.001."),
       },
-      supportedActions: ["geometry", "validate_from_pis", "create_from_pis"],
+      supportedActions: ["build_options", "geometry", "validate_from_pis", "create_from_pis"],
       resolveAction: (rawArgs) => {
         const action = typeof rawArgs.action === "string" ? rawArgs.action : "geometry";
         return { action, args: { ...rawArgs, action } };

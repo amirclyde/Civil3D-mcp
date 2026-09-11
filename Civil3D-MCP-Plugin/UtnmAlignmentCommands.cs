@@ -15,6 +15,12 @@ namespace Civil3DMcpPlugin;
 /// </summary>
 public static class UtnmAlignmentCommands
 {
+  // utnmGetBuildOptions (read-only): layers with usability, alignment styles, label sets, sites,
+  // existing alignment names and the name rules, for the user's selections before a build.
+  public static Task<object?> GetBuildOptionsAsync(JsonObject? parameters)
+    => CivilExecution.ReadAsync<object?>((doc, civilDoc, database, transaction) =>
+      UtnmBuildOptions.Read(doc, civilDoc, database, transaction));
+
   // utnmCreateAlignmentFromPis — see UtnmAlignmentBuilder. dryRun defaults to true: build, verify,
   // then roll back. A real run commits only if every IP verifies.
   public static Task<object?> CreateAlignmentFromPisAsync(JsonObject? parameters)

@@ -1,4 +1,6 @@
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
+using Autodesk.AutoCAD.ApplicationServices;
 using Autodesk.AutoCAD.DatabaseServices;
 using Autodesk.AutoCAD.Geometry;
 using Autodesk.Civil.ApplicationServices;
@@ -40,17 +42,19 @@ internal static class UtnmAlignmentBuilder
   {
     var warnings = new List<string>();
 
-    if (AlignmentExists(civilDoc, transaction, spec.Name))
+    var nameProblem = UtnmNameRules.Problem(spec.Name, ExistingAlignmentNames(civilDoc, transaction));
+    if (nameProblem != null)
     {
-      throw Invalid("CIVIL3D.CONFLICT", $"An alignment named '{spec.Name}' already exists.");
+      throw Invalid(nameProblem.StartsWith("already", StringComparison.Ordinal) ? "CIVIL3D.CONFLICT" : "CIVIL3D.INVALID_INPUT",
+        $"Alignment name '{spec.Name}' {nameProblem}");
     }
 
-    var layerId = ResolveLayer(database, transaction, spec.Layer);
+    var layerId = ResolveLayer(database, transaction, spec.Layer, warnings);
     var siteId = ResolveSite(civilDoc, transaction, spec.Site);
     var styleId = ResolveNamed(transaction, LookupUtils.GetAlignmentStyleId(civilDoc, transaction, spec.Style), spec.Style, "alignment style",
       () => civilDoc.Styles.AlignmentStyles.Cast<ObjectId>());
     var labelSetId = ResolveNamed(transaction, LookupUtils.GetAlignmentLabelSetId(civilDoc, transaction, spec.LabelSet), spec.LabelSet, "alignment label set",
-      null);
+      () => civilDoc.Styles.LabelSetStyles.AlignmentLabelSetStyles.Cast<ObjectId>());
 
     var created = Civil3DCompatibility.InvokeMatchingOverload(
       null, typeof(Alignment), "Create",
@@ -324,24 +328,18 @@ internal static class UtnmAlignmentBuilder
     throw Invalid("CIVIL3D.API_ERROR", $"{what}: could not read EntityId ({error ?? "no entity returned"})");
   }
 
-  private static bool AlignmentExists(CivilDocument civilDoc, Transaction transaction, string name)
-  {
-    try
-    {
-      CivilObjectUtils.FindAlignmentByName(civilDoc, transaction, name);
-      return true;
-    }
-    catch (JsonRpcDispatchException ex) when (ex.Code == "CIVIL3D.OBJECT_NOT_FOUND")
-    {
-      return false;
-    }
-  }
+  internal static List<string> ExistingAlignmentNames(CivilDocument civilDoc, Transaction transaction)
+    => civilDoc.GetAlignmentIds()
+      .Cast<ObjectId>()
+      .Select(id => CivilObjectUtils.GetRequiredObject<Alignment>(transaction, id, OpenMode.ForRead).Name)
+      .ToList();
 
-  private static ObjectId ResolveLayer(Database database, Transaction transaction, string? layerName)
+  // The user picks the layer; it must be a usable layer of this drawing, never a silent fallback.
+  private static ObjectId ResolveLayer(Database database, Transaction transaction, string? layerName, List<string> warnings)
   {
     if (string.IsNullOrWhiteSpace(layerName))
     {
-      return database.Clayer;
+      throw Invalid("CIVIL3D.INVALID_INPUT", "A layer must be selected.");
     }
 
     var layerTable = CivilObjectUtils.GetRequiredObject<LayerTable>(transaction, database.LayerTableId, OpenMode.ForRead);
@@ -350,7 +348,30 @@ internal static class UtnmAlignmentBuilder
       throw Invalid("CIVIL3D.INVALID_INPUT", $"Layer '{layerName}' does not exist in this drawing.");
     }
 
-    return layerTable[layerName];
+    var layerId = layerTable[layerName];
+    var layer = CivilObjectUtils.GetRequiredObject<LayerTableRecord>(transaction, layerId, OpenMode.ForRead);
+    var state = UtnmBuildOptions.ReadLayerState(layer);
+    if (state.IsDependent)
+    {
+      throw Invalid("CIVIL3D.INVALID_INPUT", $"Layer '{layerName}' belongs to an external reference and cannot hold new objects.");
+    }
+
+    if (state.IsFrozen)
+    {
+      throw Invalid("CIVIL3D.INVALID_INPUT", $"Layer '{layerName}' is frozen; the alignment would be invisible. Thaw it or pick another layer.");
+    }
+
+    if (state.IsLocked)
+    {
+      throw Invalid("CIVIL3D.INVALID_INPUT", $"Layer '{layerName}' is locked. Unlock it or pick another layer.");
+    }
+
+    if (state.IsOff)
+    {
+      warnings.Add($"layer '{layerName}' is turned off, so the alignment will not be visible until it is turned on");
+    }
+
+    return layerId;
   }
 
   private static ObjectId ResolveSite(CivilDocument civilDoc, Transaction transaction, string? siteName)
@@ -380,7 +401,7 @@ internal static class UtnmAlignmentBuilder
   {
     if (string.IsNullOrWhiteSpace(requestedName))
     {
-      return resolvedId;
+      throw Invalid("CIVIL3D.INVALID_INPUT", $"An {what} must be selected.");
     }
 
     var resolvedName = resolvedId.IsNull ? null : CivilObjectUtils.GetName(transaction.GetObject(resolvedId, OpenMode.ForRead));
@@ -427,6 +448,14 @@ internal sealed class UtnmAlignmentSpec
     if (node["alignment"] is not JsonObject alignment) throw Error("Spec is missing 'alignment'.");
     var spiralType = Text(alignment["spiral_type"]) ?? "Clothoid";
     if (!string.Equals(spiralType, "Clothoid", StringComparison.OrdinalIgnoreCase)) Fail("Only Clothoid spirals are supported in spec v0.1.");
+
+    foreach (var required in new[] { "layer", "style", "label_set" })
+    {
+      if (string.IsNullOrWhiteSpace(Text(alignment[required])))
+      {
+        Fail($"alignment.{required} is required: the user must select it from the drawing's options.");
+      }
+    }
 
     var source = node["source"] as JsonObject;
     var spec = new UtnmAlignmentSpec
@@ -485,3 +514,119 @@ internal sealed class UtnmAlignmentSpec
 }
 
 internal sealed record UtnmSpecPoint(string Id, string Role, double Easting, double Northing, string Kind, double Radius, double LsIn, double LsOut);
+
+/// <summary>
+/// Rules for a "proper" alignment name. Mirrored in utnmAlignmentDomain.ts and returned by
+/// build_options so the in-chat form validates exactly the same way.
+/// </summary>
+internal static class UtnmNameRules
+{
+  public const int MaxLength = 100;
+  public const string InvalidCharacters = "<>/\\\":;?*|=`";
+  private static readonly Regex DefaultNamePattern = new(@"^alignment\s*-\s*\(\d+\)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+  /// <summary>Returns null when the name is acceptable, otherwise the reason (a sentence fragment).</summary>
+  public static string? Problem(string? name, IEnumerable<string> existingNames)
+  {
+    if (string.IsNullOrWhiteSpace(name))
+    {
+      return "is required.";
+    }
+
+    if (name != name.Trim())
+    {
+      return "must not start or end with spaces.";
+    }
+
+    if (name.Length > MaxLength)
+    {
+      return $"is longer than {MaxLength} characters.";
+    }
+
+    var invalid = name.Where(character => InvalidCharacters.Contains(character) || char.IsControl(character)).Distinct().ToArray();
+    if (invalid.Length > 0)
+    {
+      return $"contains characters that are not allowed: {string.Join(" ", invalid.Select(character => char.IsControl(character) ? "(control)" : character.ToString()))}";
+    }
+
+    if (DefaultNamePattern.IsMatch(name))
+    {
+      return "is a Civil 3D default placeholder; enter a proper descriptive name.";
+    }
+
+    if (existingNames.Any(existing => string.Equals(existing, name, StringComparison.OrdinalIgnoreCase)))
+    {
+      return "already exists in this drawing (names are compared without regard to case).";
+    }
+
+    return null;
+  }
+}
+
+/// <summary>Choices offered to the user before a build, read from the open drawing.</summary>
+internal static class UtnmBuildOptions
+{
+  internal readonly record struct LayerState(bool IsOff, bool IsFrozen, bool IsLocked, bool IsDependent);
+
+  internal static LayerState ReadLayerState(LayerTableRecord layer)
+    => new(
+      AlignmentGeometryReader.TryRead(layer, "IsOff", out _) is true,
+      layer.IsFrozen,
+      AlignmentGeometryReader.TryRead(layer, "IsLocked", out _) is true,
+      AlignmentGeometryReader.TryRead(layer, "IsDependent", out _) is true);
+
+  internal static Dictionary<string, object?> Read(Document doc, CivilDocument civilDoc, Database database, Transaction transaction)
+  {
+    var currentLayerName = CivilObjectUtils.GetRequiredObject<LayerTableRecord>(transaction, database.Clayer, OpenMode.ForRead).Name;
+    var layers = new List<Dictionary<string, object?>>();
+    var layerTable = CivilObjectUtils.GetRequiredObject<LayerTable>(transaction, database.LayerTableId, OpenMode.ForRead);
+    foreach (ObjectId layerId in layerTable)
+    {
+      if (transaction.GetObject(layerId, OpenMode.ForRead) is not LayerTableRecord layer)
+      {
+        continue;
+      }
+
+      var state = ReadLayerState(layer);
+      var blockedReason = state.IsDependent ? "external reference layer" : state.IsFrozen ? "frozen" : state.IsLocked ? "locked" : null;
+      layers.Add(new Dictionary<string, object?>
+      {
+        ["name"] = layer.Name,
+        ["usable"] = blockedReason == null,
+        ["reason"] = blockedReason,
+        ["isOff"] = state.IsOff,
+        ["isCurrent"] = string.Equals(layer.Name, currentLayerName, StringComparison.OrdinalIgnoreCase),
+      });
+    }
+
+    return new Dictionary<string, object?>
+    {
+      ["drawing"] = CivilObjectUtils.GetStringProperty(doc, "Name"),
+      ["currentLayer"] = currentLayerName,
+      ["layers"] = layers.OrderBy(layer => (string)layer["name"]!, StringComparer.OrdinalIgnoreCase).ToList(),
+      ["alignmentStyles"] = Names(transaction, civilDoc.Styles.AlignmentStyles.Cast<ObjectId>()),
+      ["alignmentLabelSets"] = Names(transaction, civilDoc.Styles.LabelSetStyles.AlignmentLabelSetStyles.Cast<ObjectId>()),
+      ["sites"] = civilDoc.GetSiteIds()
+        .Cast<ObjectId>()
+        .Select(id => CivilObjectUtils.GetRequiredObject<Site>(transaction, id, OpenMode.ForRead).Name)
+        .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
+        .ToList(),
+      ["existingAlignmentNames"] = UtnmAlignmentBuilder.ExistingAlignmentNames(civilDoc, transaction),
+      ["nameRules"] = new Dictionary<string, object?>
+      {
+        ["maxLength"] = UtnmNameRules.MaxLength,
+        ["invalidCharacters"] = UtnmNameRules.InvalidCharacters,
+        ["rejectDefaultPlaceholder"] = "Alignment - (n)",
+        ["unique"] = true,
+      },
+    };
+  }
+
+  private static List<string> Names(Transaction transaction, IEnumerable<ObjectId> ids)
+    => ids
+      .Select(id => CivilObjectUtils.GetName(transaction.GetObject(id, OpenMode.ForRead)))
+      .Where(name => !string.IsNullOrWhiteSpace(name))
+      .Select(name => name!)
+      .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
+      .ToList();
+}
