@@ -10,6 +10,7 @@ const ProfileSummarySchema = z.object({
   name: z.string(),
   handle: z.string(),
   type: z.enum(["surface", "layout", "superimposed"]),
+  profileType: z.string().optional(),
   style: z.string(),
   startStation: z.number(),
   endStation: z.number(),
@@ -25,6 +26,7 @@ const ProfileListResponseSchema = z.object({
 const ProfileEntitySchema = z.object({
   index: z.number(),
   type: z.enum(["tangent", "circular_curve", "parabola", "asymmetric_parabola"]),
+  entityType: z.string().optional(),
   startStation: z.number(),
   endStation: z.number(),
   startElevation: z.number(),
@@ -37,6 +39,7 @@ const ProfileDetailResponseSchema = z.object({
   name: z.string(),
   handle: z.string(),
   type: z.string(),
+  profileType: z.string().optional(),
   style: z.string(),
   layer: z.string(),
   startStation: z.number(),

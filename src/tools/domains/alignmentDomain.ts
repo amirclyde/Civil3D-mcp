@@ -26,8 +26,13 @@ const AlignmentListResponseSchema = z.object({
 });
 
 const AlignmentEntitySchema = z.object({
+  // Collection index, as used by delete_entity. Entities are returned in station order; see "order".
   index: z.number(),
-  type: z.enum(["line", "arc", "spiral"]),
+  order: z.number().optional(),
+  // "line" | "arc" | "spiral" for single entities; snake_case Civil 3D group name otherwise
+  // (e.g. "spiral_curve_spiral").
+  type: z.string(),
+  entityType: z.string().optional(),
   startStation: z.number(),
   endStation: z.number(),
   length: z.number(),
@@ -47,6 +52,7 @@ const AlignmentDetailResponseSchema = z.object({
   dependentProfiles: z.array(z.string()),
   dependentCorridors: z.array(z.string()),
   isReference: z.boolean(),
+  diagnostics: z.record(z.string()).nullable().optional(),
 });
 
 const AlignmentStationToPointResponseSchema = z.object({
@@ -85,11 +91,12 @@ const AlignmentReportResponseSchema = z.object({
     endStation: z.number(),
     length: z.number(),
     entityCount: z.number(),
+    // line/arc/spiral always present; group types (e.g. spiral_curve_spiral) added when found.
     entityTypeBreakdown: z.object({
       line: z.number(),
       arc: z.number(),
       spiral: z.number(),
-    }),
+    }).catchall(z.number()),
     dependentProfileCount: z.number(),
     dependentCorridorCount: z.number(),
   }),
@@ -418,9 +425,9 @@ export const ALIGNMENT_DOMAIN_DEFINITION: DomainToolDefinition = {
           }),
         ).samples;
 
-        const entityTypeBreakdown = alignment.entities.reduce(
+        const entityTypeBreakdown = alignment.entities.reduce<Record<string, number>>(
           (accumulator, entity) => {
-            accumulator[entity.type] += 1;
+            accumulator[entity.type] = (accumulator[entity.type] ?? 0) + 1;
             return accumulator;
           },
           { line: 0, arc: 0, spiral: 0 },

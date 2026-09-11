@@ -33,7 +33,8 @@ export type ToolDomain =
   | "help"
   | "catchment"
   | "stm"
-  | "plugin";
+  | "plugin"
+  | "utnm_alignment";
 
 export type ToolCapability =
   | "query"

@@ -402,4 +402,158 @@ internal static class Civil3DCompatibility
 
     return false;
   }
+
+  // ─── Diagnostic reads (added for AlignmentGeometryReader) ────────────────────
+  // Unlike GetPropertyValue, these report *why* a read failed instead of returning null,
+  // and resolve hidden ("new") properties to the most-derived declaration.
+
+  public static object? TryReadProperty(object? target, string propertyName, out string? error)
+  {
+    error = null;
+    if (target == null)
+    {
+      error = "target is null";
+      return null;
+    }
+
+    try
+    {
+      var property = FindMostDerivedProperty(target.GetType(), propertyName);
+      if (property == null)
+      {
+        error = "property not found";
+        return null;
+      }
+
+      return property.GetValue(target);
+    }
+    catch (Exception ex)
+    {
+      error = DescribeException(ex);
+      return null;
+    }
+  }
+
+  public static object? TryReadIntIndexer(object target, int index, out string? error)
+  {
+    error = null;
+    try
+    {
+      var indexer = target.GetType().GetProperties(BindingFlags.Public | BindingFlags.Instance)
+        .FirstOrDefault(property =>
+        {
+          var parameters = property.GetIndexParameters();
+          return property.CanRead && parameters.Length == 1 && parameters[0].ParameterType == typeof(int);
+        });
+      if (indexer != null)
+      {
+        return indexer.GetValue(target, new object[] { index });
+      }
+
+      var method = target.GetType().GetMethod("GetSubEntity", new[] { typeof(int) });
+      if (method != null)
+      {
+        return method.Invoke(target, new object[] { index });
+      }
+
+      error = "no int indexer or GetSubEntity(int) found";
+      return null;
+    }
+    catch (Exception ex)
+    {
+      error = DescribeException(ex);
+      return null;
+    }
+  }
+
+  public static Dictionary<string, object?> ReadAllPropertiesForReport(object target, IDictionary<string, string> errors)
+  {
+    var values = new Dictionary<string, object?>(StringComparer.Ordinal);
+    var seen = new HashSet<string>(StringComparer.Ordinal);
+    foreach (var property in target.GetType().GetProperties(BindingFlags.Public | BindingFlags.Instance)
+      .Where(property => property.CanRead && property.GetIndexParameters().Length == 0)
+      .OrderByDescending(property => InheritanceDepth(property.DeclaringType)))
+    {
+      if (!seen.Add(property.Name))
+      {
+        continue;
+      }
+
+      try
+      {
+        values[property.Name] = ToReportValue(property.GetValue(target));
+      }
+      catch (Exception ex)
+      {
+        errors[property.Name] = DescribeException(ex);
+      }
+    }
+
+    return values;
+  }
+
+  public static string DescribeException(Exception ex)
+  {
+    var inner = ex is TargetInvocationException { InnerException: not null } ? ex.InnerException! : ex;
+    return $"{inner.GetType().Name}: {inner.Message}";
+  }
+
+  private static PropertyInfo? FindMostDerivedProperty(Type type, string propertyName)
+  {
+    return type.GetProperties(BindingFlags.Public | BindingFlags.Instance)
+      .Where(property => property.Name == propertyName && property.CanRead && property.GetIndexParameters().Length == 0)
+      .OrderByDescending(property => InheritanceDepth(property.DeclaringType))
+      .FirstOrDefault();
+  }
+
+  private static int InheritanceDepth(Type? type)
+  {
+    var depth = 0;
+    while (type != null)
+    {
+      depth++;
+      type = type.BaseType;
+    }
+
+    return depth;
+  }
+
+  private static object? ToReportValue(object? value)
+  {
+    switch (value)
+    {
+      case null:
+        return null;
+      case string text:
+        return text;
+      case bool flag:
+        return flag;
+      case double number:
+        return double.IsFinite(number) ? number : number.ToString();
+      case float single:
+        return float.IsFinite(single) ? (double)single : single.ToString();
+      case int or long or short or byte or uint or ushort:
+        return Convert.ToInt64(value);
+      case Enum enumValue:
+        return enumValue.ToString();
+    }
+
+    var type = value.GetType();
+    if (type.Name is "Point2d" or "Point3d" or "Vector2d" or "Vector3d")
+    {
+      var axes = new Dictionary<string, object?>();
+      foreach (var axis in new[] { "X", "Y", "Z" })
+      {
+        var axisProperty = type.GetProperty(axis, BindingFlags.Public | BindingFlags.Instance);
+        if (axisProperty != null)
+        {
+          axes[axis.ToLowerInvariant()] = ToReportValue(axisProperty.GetValue(value));
+        }
+      }
+
+      return axes;
+    }
+
+    return $"<{type.Name}>";
+  }
 }

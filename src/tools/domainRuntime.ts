@@ -1,4 +1,4 @@
-import { z, type ZodRawShape, type ZodTypeAny } from "zod";
+import { z, type ZodError, type ZodRawShape, type ZodTypeAny } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { approvalPolicy, getActiveDrawingFingerprint, hasApprovalRisk } from "./approvalPolicy.js";
 import { captureToolHandler } from "./toolHandlerRegistry.js";
@@ -148,7 +148,15 @@ async function executeExposure(
     throw new Error(`Action '${actionName}' is not defined for domain '${definition.domain}'.`);
   }
 
-  const parsedArgs = actionDefinition.inputSchema.parse(resolved.args);
+  const parsedInput = actionDefinition.inputSchema.safeParse(resolved.args);
+  if (!parsedInput.success) {
+    const error = new Error(
+      `Invalid parameters for ${exposure.toolName} action '${actionName}': ${formatValidationIssues(parsedInput.error)}`,
+    ) as Error & { code: string };
+    error.code = "CIVIL3D.INVALID_INPUT";
+    throw error;
+  }
+  const parsedArgs = parsedInput.data;
   const idempotencyKey = typeof rawArgs.idempotencyKey === "string"
     ? rawArgs.idempotencyKey
     : undefined;
@@ -176,9 +184,19 @@ async function executeExposure(
       `${exposure.displayName}: validated and executing '${actionName}'.`,
     );
     const response = await actionDefinition.execute(parsedArgs);
-    const validatedResponse = actionDefinition.responseSchema
-      ? actionDefinition.responseSchema.parse(response)
-      : response;
+    let validatedResponse: unknown = response;
+    if (actionDefinition.responseSchema) {
+      const parsedResponse = actionDefinition.responseSchema.safeParse(response);
+      if (!parsedResponse.success) {
+        const error = new Error(
+          `Civil 3D returned data that does not match the ${exposure.toolName} '${actionName}' response contract ` +
+          `(server-side bug, not a drawing problem): ${formatValidationIssues(parsedResponse.error)}`,
+        ) as Error & { code: string };
+        error.code = "CIVIL3D.INTERNAL_ERROR";
+        throw error;
+      }
+      validatedResponse = parsedResponse.data;
+    }
     const serializedResponse = JSON.stringify(validatedResponse, null, 2);
     const reportResource = maybeStoreReportResource(actionName, serializedResponse);
 
@@ -211,6 +229,12 @@ async function executeExposure(
     signature,
     executeOnce,
   );
+}
+
+export function formatValidationIssues(error: ZodError): string {
+  return error.issues
+    .map((issue) => `${issue.path.length > 0 ? issue.path.join(".") : "(input)"}: ${issue.message}`)
+    .join("; ");
 }
 
 async function emitProgress(

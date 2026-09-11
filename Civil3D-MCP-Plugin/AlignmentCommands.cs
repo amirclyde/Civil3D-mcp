@@ -31,35 +31,39 @@ public static class AlignmentCommands
     return CivilExecution.ReadAsync<object?>((doc, civilDoc, database, transaction) =>
     {
       var alignment = CivilObjectUtils.FindAlignmentByName(civilDoc, transaction, name);
-      var entities = new List<Dictionary<string, object?>>();
-      var entityCollection = CivilObjectUtils.GetPropertyValue<object>(alignment, "Entities");
-      if (entityCollection is System.Collections.IEnumerable enumerable)
-      {
-        var index = 0;
-        foreach (var entity in enumerable)
-        {
-          entities.Add(new Dictionary<string, object?>
-          {
-            ["index"] = index++,
-            ["type"] = MapAlignmentEntityType(CivilObjectUtils.GetStringProperty(entity, "EntityType") ?? entity?.GetType().Name),
-            ["startStation"] = CivilObjectUtils.GetPropertyValue<double?>(entity, "StartStation") ?? 0,
-            ["endStation"] = CivilObjectUtils.GetPropertyValue<double?>(entity, "EndStation") ?? 0,
-            ["length"] = CivilObjectUtils.GetPropertyValue<double?>(entity, "Length") ?? 0,
-          });
-        }
-      }
+
+      // Station order, exact lengths, and Civil 3D's own entity type names (see AlignmentGeometryReader).
+      // "index" stays the collection index used by delete_entity; "order" is the position along the alignment.
+      var entities = AlignmentGeometryReader.ReadEntities(alignment)
+        .Select((row, order) => AlignmentGeometryReader.DescribeEntity(alignment, row, order, detailed: false))
+        .ToList();
 
       var dependentProfiles = alignment.GetProfileIds()
         .Cast<ObjectId>()
         .Select(id => CivilObjectUtils.GetRequiredObject<Profile>(transaction, id, OpenMode.ForRead).Name)
         .ToList();
 
+      var (styleName, styleError) = AlignmentGeometryReader.ReadStyleName(alignment, transaction);
+      var (dependentCorridors, corridorError) =
+        AlignmentGeometryReader.ReadDependentCorridors(civilDoc, transaction, alignment.ObjectId);
+
+      var diagnostics = new Dictionary<string, string>();
+      if (styleError != null)
+      {
+        diagnostics["style"] = styleError;
+      }
+
+      if (corridorError != null)
+      {
+        diagnostics["dependentCorridors"] = corridorError;
+      }
+
       return new Dictionary<string, object?>
       {
         ["name"] = alignment.Name,
         ["handle"] = CivilObjectUtils.GetHandle(alignment),
         ["type"] = MapAlignmentType(CivilObjectUtils.GetStringProperty(alignment, "AlignmentType") ?? alignment.GetType().Name),
-        ["style"] = CivilObjectUtils.GetName(transaction.GetObject(alignment.StyleId, OpenMode.ForRead)) ?? string.Empty,
+        ["style"] = styleName ?? string.Empty,
         ["layer"] = alignment.Layer,
         ["length"] = alignment.Length,
         ["startStation"] = alignment.StartingStation,
@@ -67,8 +71,9 @@ public static class AlignmentCommands
         ["entityCount"] = entities.Count,
         ["entities"] = entities,
         ["dependentProfiles"] = dependentProfiles,
-        ["dependentCorridors"] = new List<string>(),
+        ["dependentCorridors"] = dependentCorridors,
         ["isReference"] = CivilObjectUtils.GetPropertyValue<bool?>(alignment, "IsReferenceObject") ?? false,
+        ["diagnostics"] = diagnostics.Count > 0 ? diagnostics : null,
       };
     });
   }
@@ -268,21 +273,5 @@ public static class AlignmentCommands
     }
 
     return "centerline";
-  }
-
-  private static string MapAlignmentEntityType(string? value)
-  {
-    var text = value?.ToLowerInvariant() ?? string.Empty;
-    if (text.Contains("spiral"))
-    {
-      return "spiral";
-    }
-
-    if (text.Contains("curve") || text.Contains("arc"))
-    {
-      return "arc";
-    }
-
-    return "line";
   }
 }

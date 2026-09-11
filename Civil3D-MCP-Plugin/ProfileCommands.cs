@@ -42,7 +42,10 @@ public static class ProfileCommands
         ["name"] = profile.Name,
         ["handle"] = CivilObjectUtils.GetHandle(profile),
         ["type"] = MapProfileType(profile.ProfileType.ToString()),
-        ["style"] = CivilObjectUtils.GetName(transaction.GetObject(profile.StyleId, OpenMode.ForRead)) ?? string.Empty,
+        ["profileType"] = profile.ProfileType.ToString(),
+        ["style"] = AlignmentGeometryReader.TryRead(profile, "StyleName", out _) as string
+          ?? CivilObjectUtils.GetName(transaction.GetObject(profile.StyleId, OpenMode.ForRead))
+          ?? string.Empty,
         ["layer"] = profile.Layer,
         ["startStation"] = profile.StartingStation,
         ["endStation"] = profile.EndingStation,
@@ -198,7 +201,8 @@ public static class ProfileCommands
       ["name"] = profile.Name,
       ["handle"] = CivilObjectUtils.GetHandle(profile),
       ["type"] = MapProfileType(profile.ProfileType.ToString()),
-      ["style"] = string.Empty,
+      ["profileType"] = profile.ProfileType.ToString(),
+      ["style"] = AlignmentGeometryReader.TryRead(profile, "StyleName", out _) as string ?? string.Empty,
       ["startStation"] = profile.StartingStation,
       ["endStation"] = profile.EndingStation,
       ["minElevation"] = extents.Min,
@@ -216,6 +220,7 @@ public static class ProfileCommands
       {
         ["index"] = index++,
         ["type"] = MapProfileEntityType(entity.EntityType.ToString()),
+        ["entityType"] = entity.EntityType.ToString(),
         ["startStation"] = entity.StartStation,
         ["endStation"] = entity.EndStation,
         ["startElevation"] = entity.StartElevation,
@@ -270,8 +275,9 @@ public static class ProfileCommands
 
   private static string MapProfileType(string? value)
   {
+    // Civil 3D reports existing-ground profiles sampled from a surface as "EG".
     var text = value?.ToLowerInvariant() ?? string.Empty;
-    if (text.Contains("surface"))
+    if (text == "eg" || text.Contains("surface") || text.Contains("existing"))
     {
       return "surface";
     }
@@ -287,17 +293,14 @@ public static class ProfileCommands
   private static string MapProfileEntityType(string value)
   {
     var text = value.ToLowerInvariant();
-    if (text.Contains("asymmetric"))
-    {
-      return "asymmetric_parabola";
-    }
-
     if (text.Contains("parabola"))
     {
-      return "parabola";
+      // "ParabolaSymmetric" contains the substring "asymmetric" ("parabol-a-symmetric"),
+      // so strip "parabola" before testing for asymmetry.
+      return text.Replace("parabola", string.Empty).Contains("asymmetric") ? "asymmetric_parabola" : "parabola";
     }
 
-    if (text.Contains("curve"))
+    if (text.Contains("circular") || text.Contains("curve"))
     {
       return "circular_curve";
     }
