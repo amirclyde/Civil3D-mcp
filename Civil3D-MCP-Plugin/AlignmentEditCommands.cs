@@ -169,113 +169,307 @@ public static class AlignmentEditCommands
   }
 
   // ─── alignmentOffsetCreate ────────────────────────────────────────────────
+  // Ribbon "Create Offset Alignment": Alignment.CreateOffsetAlignment(name, parentId, offset, styleId[, start, end])
+  // (+ optional "Create offset profile" by cross slope: Profile.CreateOffsetProfileBySlope).
+  // Offset sign follows Civil 3D: positive = right of the parent, negative = left.
 
   public static Task<object?> OffsetCreateAsync(JsonObject? parameters)
   {
     var alignmentName = PluginRuntime.GetRequiredString(parameters, "alignmentName");
     var offsetName = PluginRuntime.GetRequiredString(parameters, "offsetName");
     var offset = PluginRuntime.GetRequiredDouble(parameters, "offset");
+    var startStation = PluginRuntime.GetOptionalDouble(parameters, "startStation");
+    var endStation = PluginRuntime.GetOptionalDouble(parameters, "endStation");
+    var styleName = PluginRuntime.GetOptionalString(parameters, "style");
+    var layerName = PluginRuntime.GetOptionalString(parameters, "layer");
+    var labelSet = PluginRuntime.GetOptionalString(parameters, "labelSet");
+    var profileName = PluginRuntime.GetOptionalString(parameters, "offsetProfileName");
+    var slope = PluginRuntime.GetOptionalDouble(parameters, "offsetProfileSlope");
+    var profileStyle = PluginRuntime.GetOptionalString(parameters, "offsetProfileStyle");
+    var parentProfileName = PluginRuntime.GetOptionalString(parameters, "parentProfileName");
+
+    if (Math.Abs(offset) < 1e-9)
+      throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "offset must be non-zero (positive = right of the parent alignment, negative = left).");
+    if ((startStation.HasValue) != (endStation.HasValue))
+      throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "startStation and endStation must be given together (or both omitted for the full length).");
 
     return CivilExecution.WriteAsync<object?>((doc, civilDoc, database, transaction) =>
     {
-      var baseAlignment = CivilObjectUtils.FindAlignmentByName(civilDoc, transaction, alignmentName);
-      var layerId = LookupUtils.GetLayerId(database, transaction, PluginRuntime.GetOptionalString(parameters, "layer"));
-      var styleId = LookupUtils.GetAlignmentStyleId(civilDoc, transaction, PluginRuntime.GetOptionalString(parameters, "style"));
-      var labelSetId = LookupUtils.GetAlignmentLabelSetId(civilDoc, transaction, PluginRuntime.GetOptionalString(parameters, "labelSet"));
-      var siteId = LookupUtils.GetSiteId(civilDoc, transaction, null);
+      var parent = CivilObjectUtils.FindAlignmentByName(civilDoc, transaction, alignmentName);
+      if (AlignmentExists(civilDoc, transaction, offsetName))
+        throw new JsonRpcDispatchException("CIVIL3D.CONFLICT", $"Alignment '{offsetName}' already exists. Nothing was created.");
+      if (startStation.HasValue && (startStation.Value < parent.StartingStation - 1e-6 || endStation!.Value > parent.EndingStation + 1e-6 || endStation.Value <= startStation.Value))
+        throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT",
+          $"Station range {startStation:0.###}-{endStation:0.###} must lie within '{parent.Name}' ({parent.StartingStation:0.###} to {parent.EndingStation:0.###}) with end > start.");
 
-      // Alignment.CreateOffsetAlignment(name, baseAlignmentId, offset, siteId, layerId, styleId, labelSetId)
-      var offsetAlignmentId = (ObjectId)(
-        CivilObjectUtils.InvokeStaticMethod(typeof(Alignment), "CreateOffsetAlignment",
-          offsetName, baseAlignment.ObjectId, offset, siteId, layerId, styleId, labelSetId)
-        ?? CivilObjectUtils.InvokeStaticMethod(typeof(Alignment), "CreateOffsetAlignment",
-          offsetName, baseAlignment.ObjectId, offset, layerId, styleId, labelSetId)
-        ?? throw new JsonRpcDispatchException(
-          "CIVIL3D.TRANSACTION_FAILED",
-          "Alignment.CreateOffsetAlignment is not available in this Civil 3D version."));
-
-      var offsetAlignment = CivilObjectUtils.GetRequiredObject<Alignment>(transaction, offsetAlignmentId, OpenMode.ForRead);
-
-      return new Dictionary<string, object?>
+      var styleId = LookupUtils.GetAlignmentStyleId(civilDoc, transaction, styleName);
+      ObjectId offsetId;
+      try
       {
-        ["baseAlignmentName"] = baseAlignment.Name,
+        offsetId = startStation.HasValue
+          ? Alignment.CreateOffsetAlignment(offsetName, parent.ObjectId, offset, styleId, startStation.Value, endStation!.Value)
+          : Alignment.CreateOffsetAlignment(offsetName, parent.ObjectId, offset, styleId);
+      }
+      catch (Exception ex)
+      {
+        throw new JsonRpcDispatchException("CIVIL3D.API_ERROR",
+          $"Civil 3D could not create the offset alignment: {ex.GetType().Name}: {ex.Message}. Nothing was created.");
+      }
+
+      var offsetAlignment = CivilObjectUtils.GetRequiredObject<Alignment>(transaction, offsetId, OpenMode.ForWrite);
+      if (!string.IsNullOrWhiteSpace(layerName))
+      {
+        var layerId = LookupUtils.GetLayerId(database, transaction, layerName);
+        if (!layerId.IsNull) offsetAlignment.LayerId = layerId;
+      }
+      if (!string.IsNullOrWhiteSpace(labelSet))
+      {
+        try { offsetAlignment.ImportLabelSet(labelSet); } catch (Exception ex) { PluginLog.Warn("AlignmentEdit", $"Label set '{labelSet}' not applied: {ex.Message}"); }
+      }
+
+      var result = new Dictionary<string, object?>
+      {
+        ["baseAlignmentName"] = parent.Name,
         ["offsetName"] = offsetAlignment.Name,
         ["offset"] = offset,
+        ["side"] = offset > 0 ? "right" : "left",
         ["handle"] = CivilObjectUtils.GetHandle(offsetAlignment),
+        ["startStation"] = offsetAlignment.StartingStation,
+        ["endStation"] = offsetAlignment.EndingStation,
+        ["length"] = offsetAlignment.Length,
+        ["isOffsetAlignment"] = offsetAlignment.IsOffsetAlignment,
+        ["style"] = AlignmentGeometryReader.ReadStyleName(offsetAlignment, transaction).Name,
         ["success"] = true,
       };
+
+      if (!string.IsNullOrWhiteSpace(profileName) || slope.HasValue)
+      {
+        if (!slope.HasValue)
+          throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "offsetProfileSlope (decimal cross slope, e.g. -0.025) is required with offsetProfileName. The offset alignment was created.");
+        var pName = profileName ?? $"{offsetAlignment.Name} - Profile";
+        var pStyle = LookupUtils.GetProfileStyleId(civilDoc, transaction, profileStyle);
+        var parentProfile = FindParentProfile(civilDoc, transaction, parent, parentProfileName);
+        try
+        {
+          // Instance method on the PARENT profile: the offset profile follows it at the given cross slope.
+          var pId = parentProfile.CreateOffsetProfileBySlope(pName, offsetId, pStyle, slope.Value);
+          var profile = CivilObjectUtils.GetRequiredObject<Profile>(transaction, pId, OpenMode.ForRead);
+          result["offsetProfile"] = new Dictionary<string, object?>
+          {
+            ["name"] = profile.Name,
+            ["handle"] = CivilObjectUtils.GetHandle(profile),
+            ["parentProfileName"] = parentProfile.Name,
+            ["slope"] = slope.Value,
+            ["startStation"] = profile.StartingStation,
+            ["endStation"] = profile.EndingStation,
+            ["minElevation"] = profile.ElevationMin,
+            ["maxElevation"] = profile.ElevationMax,
+          };
+        }
+        catch (Exception ex)
+        {
+          result["offsetProfileError"] = $"{ex.GetType().Name}: {ex.Message} (the parent alignment needs a design profile for an offset profile by slope)";
+        }
+      }
+
+      return result;
     });
   }
 
   // ─── alignmentWidenTransition ─────────────────────────────────────────────
+  // Ribbon "Create Widening": on an offset alignment, OffsetAlignmentInfo.AddWidening(start, end, offsetDistance)
+  // creates a widening region with entry/exit transitions. Pass either the offset alignment itself
+  // (alignmentName) or the parent + side/offsetName to locate it. Optionally creates the offset alignment first.
 
   public static Task<object?> WidenTransitionAsync(JsonObject? parameters)
   {
     var alignmentName = PluginRuntime.GetRequiredString(parameters, "alignmentName");
-    var side = PluginRuntime.GetRequiredString(parameters, "side");
     var startStation = PluginRuntime.GetRequiredDouble(parameters, "startStation");
     var endStation = PluginRuntime.GetRequiredDouble(parameters, "endStation");
-    var startOffset = PluginRuntime.GetRequiredDouble(parameters, "startOffset");
-    var endOffset = PluginRuntime.GetRequiredDouble(parameters, "endOffset");
-    var offsetName = PluginRuntime.GetOptionalString(parameters, "offsetName")
-      ?? $"{alignmentName}_Widen_{side}";
+    var wideningOffset = PluginRuntime.GetOptionalDouble(parameters, "wideningOffset") ?? PluginRuntime.GetOptionalDouble(parameters, "endOffset");
+    var offsetName = PluginRuntime.GetOptionalString(parameters, "offsetName");
+    var baseOffset = PluginRuntime.GetOptionalDouble(parameters, "startOffset");
+    var side = PluginRuntime.GetOptionalString(parameters, "side");
+    var styleName = PluginRuntime.GetOptionalString(parameters, "style");
+
+    if (!wideningOffset.HasValue)
+      throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "wideningOffset (the offset from the parent inside the widened region, signed: + right / - left) is required.");
+    if (endStation <= startStation)
+      throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "endStation must be greater than startStation.");
 
     return CivilExecution.WriteAsync<object?>((doc, civilDoc, database, transaction) =>
     {
-      var baseAlignment = CivilObjectUtils.FindAlignmentByName(civilDoc, transaction, alignmentName);
+      var named = CivilObjectUtils.FindAlignmentByName(civilDoc, transaction, alignmentName);
+      Alignment offsetAlignment;
+      Alignment parent;
 
-      // Build a variable-offset alignment using AlignmentOffsetOptions if available,
-      // or fall back to creating a simple offset and noting limitations.
-      var layerId = LookupUtils.GetLayerId(database, transaction, null);
-      var styleId = LookupUtils.GetAlignmentStyleId(civilDoc, transaction, null);
-      var labelSetId = LookupUtils.GetAlignmentLabelSetId(civilDoc, transaction, null);
-      var siteId = LookupUtils.GetSiteId(civilDoc, transaction, null);
+      if (named.IsOffsetAlignment)
+      {
+        offsetAlignment = CivilObjectUtils.GetRequiredObject<Alignment>(transaction, named.ObjectId, OpenMode.ForWrite);
+        parent = CivilObjectUtils.GetRequiredObject<Alignment>(transaction, named.OffsetAlignmentInfo.ParentAlignmentId, OpenMode.ForRead);
+      }
+      else
+      {
+        parent = named;
+        Alignment? existing = null;
+        if (!string.IsNullOrWhiteSpace(offsetName))
+        {
+          try { existing = CivilObjectUtils.FindAlignmentByName(civilDoc, transaction, offsetName); } catch { }
+          if (existing != null && !existing.IsOffsetAlignment)
+            throw new JsonRpcDispatchException("CIVIL3D.CONFLICT", $"'{offsetName}' exists but is not an offset alignment.");
+        }
+        if (existing == null)
+        {
+          if (!baseOffset.HasValue)
+            throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT",
+              $"'{parent.Name}' is a parent alignment. Give startOffset (the normal offset, signed) to create the offset alignment first, or pass an existing offset alignment as alignmentName.");
+          var name = offsetName ?? $"{parent.Name} - Offset {(baseOffset.Value > 0 ? "R" : "L")} {Math.Abs(baseOffset.Value):0.###}";
+          var styleId = LookupUtils.GetAlignmentStyleId(civilDoc, transaction, styleName);
+          var id = Alignment.CreateOffsetAlignment(name, parent.ObjectId, baseOffset.Value, styleId);
+          existing = CivilObjectUtils.GetRequiredObject<Alignment>(transaction, id, OpenMode.ForWrite);
+        }
+        offsetAlignment = CivilObjectUtils.GetRequiredObject<Alignment>(transaction, existing.ObjectId, OpenMode.ForWrite);
+      }
 
-      // Attempt variable offset via Alignment.CreateOffsetAlignment with OffsetOptions
-      var offsetAlignmentId = TryCreateWidenTransition(
-        civilDoc, transaction, database,
-        baseAlignment, offsetName, side,
-        startStation, endStation, startOffset, endOffset,
-        siteId, layerId, styleId, labelSetId);
+      var info = offsetAlignment.OffsetAlignmentInfo;
+      var nominal = info.NominalOffset;
+      if (Math.Sign(wideningOffset.Value) != Math.Sign(nominal) && Math.Abs(nominal) > 1e-9)
+        throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT",
+          $"wideningOffset {wideningOffset.Value:0.###} is on the opposite side of the offset alignment's nominal offset {nominal:0.###}. Nothing was changed.");
+      if (startStation < parent.StartingStation - 1e-6 || endStation > parent.EndingStation + 1e-6)
+        throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT",
+          $"Widening {startStation:0.###}-{endStation:0.###} must lie within '{parent.Name}' ({parent.StartingStation:0.###} to {parent.EndingStation:0.###}).");
 
-      var resultAlignment = CivilObjectUtils.GetRequiredObject<Alignment>(
-        transaction, offsetAlignmentId, OpenMode.ForRead);
+      try
+      {
+        info.AddWidening(startStation, endStation, wideningOffset.Value);
+      }
+      catch (Exception ex)
+      {
+        throw new JsonRpcDispatchException("CIVIL3D.API_ERROR",
+          $"Civil 3D refused the widening on '{offsetAlignment.Name}': {ex.GetType().Name}: {ex.Message}. Nothing was changed.");
+      }
 
       return new Dictionary<string, object?>
       {
-        ["baseAlignmentName"] = baseAlignment.Name,
-        ["offsetName"] = resultAlignment.Name,
-        ["side"] = side,
-        ["startStation"] = startStation,
-        ["endStation"] = endStation,
-        ["startOffset"] = startOffset,
-        ["endOffset"] = endOffset,
-        ["handle"] = CivilObjectUtils.GetHandle(resultAlignment),
+        ["baseAlignmentName"] = parent.Name,
+        ["offsetName"] = offsetAlignment.Name,
+        ["nominalOffset"] = nominal,
+        ["widening"] = new Dictionary<string, object?>
+        {
+          ["startStation"] = startStation,
+          ["endStation"] = endStation,
+          ["offset"] = wideningOffset.Value,
+          ["increasedWidth"] = Math.Abs(wideningOffset.Value) - Math.Abs(nominal),
+        },
+        ["handle"] = CivilObjectUtils.GetHandle(offsetAlignment),
+        ["note"] = "Use offset_info to read the widening regions and transitions.",
         ["success"] = true,
       };
     });
   }
 
-  // ─── Private helpers ─────────────────────────────────────────────────────
+  // ─── alignmentOffsetInfo: nominal offset, regions and transitions of an offset alignment ──
 
-  private static ObjectId TryCreateWidenTransition(
-    Autodesk.Civil.ApplicationServices.CivilDocument civilDoc,
-    Transaction transaction,
-    Database database,
-    Alignment baseAlignment,
-    string offsetName,
-    string side,
-    double startStation,
-    double endStation,
-    double startOffset,
-    double endOffset,
-    ObjectId siteId,
-    ObjectId layerId,
-    ObjectId styleId,
-    ObjectId labelSetId)
+  public static Task<object?> OffsetInfoAsync(JsonObject? parameters)
   {
-    throw new JsonRpcDispatchException(
-      "CIVIL3D.API_ERROR",
-      "Civil 3D 2026 does not expose Alignment.CreateWideningAlignment in the managed API. No constant-offset substitute was created.");
+    var alignmentName = PluginRuntime.GetRequiredString(parameters, "alignmentName");
+    // Opened for write: OffsetAlignmentInfo.Regions is only readable from a write-opened alignment.
+    return CivilExecution.WriteAsync<object?>((doc, civilDoc, database, transaction) =>
+    {
+      var found = CivilObjectUtils.FindAlignmentByName(civilDoc, transaction, alignmentName);
+      var alignment = CivilObjectUtils.GetRequiredObject<Alignment>(transaction, found.ObjectId, OpenMode.ForWrite);
+      if (!alignment.IsOffsetAlignment)
+      {
+        var children = new List<string>();
+        try { foreach (ObjectId id in alignment.GetChildOffsetAlignmentIds()) if (transaction.GetObject(id, OpenMode.ForRead) is Alignment c) children.Add(c.Name); } catch { }
+        return new Dictionary<string, object?>
+        {
+          ["alignmentName"] = alignment.Name,
+          ["isOffsetAlignment"] = false,
+          ["childOffsetAlignments"] = children,
+        };
+      }
+      var info = alignment.OffsetAlignmentInfo;
+      var parent = transaction.GetObject(info.ParentAlignmentId, OpenMode.ForRead) as Alignment;
+      return new Dictionary<string, object?>
+      {
+        ["alignmentName"] = alignment.Name,
+        ["isOffsetAlignment"] = true,
+        ["parentAlignmentName"] = parent?.Name,
+        ["nominalOffset"] = info.NominalOffset,
+        ["side"] = info.Side.ToString(),
+        ["lockMode"] = info.LockMode.ToString(),
+        ["updateMode"] = info.UpdateMode.ToString(),
+        ["startStation"] = alignment.StartingStation,
+        ["endStation"] = alignment.EndingStation,
+        ["regions"] = ReadOffsetRegions(info),
+      };
+    });
+  }
+
+  private static Profile FindParentProfile(Autodesk.Civil.ApplicationServices.CivilDocument civilDoc, Transaction transaction, Alignment parent, string? parentProfileName)
+  {
+    if (!string.IsNullOrWhiteSpace(parentProfileName))
+      return CivilObjectUtils.FindProfileByName(parent, transaction, parentProfileName, OpenMode.ForRead);
+
+    var candidates = new List<Profile>();
+    foreach (ObjectId id in parent.GetProfileIds())
+    {
+      if (transaction.GetObject(id, OpenMode.ForRead) is Profile pr) candidates.Add(pr);
+    }
+    var design = candidates.Where(pr => pr.ProfileType != ProfileType.EG).ToList();
+    if (design.Count == 1) return design[0];
+    if (design.Count == 0)
+      throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT",
+        $"'{parent.Name}' has no design (layout) profile to offset from; give parentProfileName or create one first. Profiles: {string.Join(", ", candidates.Select(c => c.Name))}.");
+    throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT",
+      $"'{parent.Name}' has several design profiles ({string.Join(", ", design.Select(c => c.Name))}); give parentProfileName.");
+  }
+
+  private static List<Dictionary<string, object?>> ReadOffsetRegions(OffsetAlignmentInfo info)
+  {
+    var list = new List<Dictionary<string, object?>>();
+    AlignmentRegionCollection regions;
+    try { regions = info.Regions; }
+    catch (Exception ex)
+    {
+      list.Add(new Dictionary<string, object?> { ["error"] = $"Regions unavailable: {ex.GetType().Name}: {ex.Message}" });
+      return list;
+    }
+    for (var i = 0; i < regions.Count; i++)
+    {
+      var item = new Dictionary<string, object?> { ["index"] = i };
+      try
+      {
+        var region = regions[i];
+        item["type"] = R(() => region.RegionType.ToString());
+        item["startStation"] = R(() => (object)region.StartStation);
+        item["endStation"] = R(() => (object)region.EndStation);
+        item["length"] = R(() => (object)region.Length);
+        item["offset"] = R(() => (object)region.Offset);
+        item["increasedWidth"] = R(() => (object)region.IncreasedWidth);
+        item["entryTransition"] = R(() => region.EntryTransition?.TransitionType.ToString());
+        item["exitTransition"] = R(() => region.ExitTransition?.TransitionType.ToString());
+      }
+      catch (Exception ex) { item["error"] = ex.Message; }
+      list.Add(item);
+    }
+    return list;
+  }
+
+  private static object? R(Func<object?> read)
+  {
+    try { return read(); } catch { return null; }
+  }
+
+  private static bool AlignmentExists(Autodesk.Civil.ApplicationServices.CivilDocument civilDoc, Transaction transaction, string name)
+  {
+    foreach (ObjectId id in civilDoc.GetAlignmentIds())
+    {
+      var a = transaction.GetObject(id, OpenMode.ForRead) as Alignment;
+      if (a != null && string.Equals(a.Name, name, StringComparison.OrdinalIgnoreCase)) return true;
+    }
+    return false;
   }
 }

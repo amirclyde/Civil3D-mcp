@@ -51,7 +51,35 @@ const canonicalGradingInputShape = {
     "feature_line_get",
     "feature_line_export_as_polyline",
     "feature_line_create",
+    "feature_line_create_from_object",
+    "feature_line_create_from_layer",
+    "feature_line_elevations_from_cogo",
+    "feature_line_points",
+    "feature_line_edit",
   ]),
+  sourceLayer: z.string().optional().describe("feature_line_create_from_layer: layer whose polylines/lines/arcs become feature lines."),
+  namePrefix: z.string().optional().describe("feature_line_create_from_layer: names <prefix>-01, -02 … (or give names[])."),
+  names: z.array(z.string()).optional(),
+  elevationsFrom: z.enum(["cogo", "surface", "none"]).optional().describe("feature_line_create_from_layer: default cogo — each vertex takes the elevation of the COGO point on it."),
+  tolerance: z.number().positive().optional().describe("COGO-to-vertex match distance (default 0.05)."),
+  addElevationPointsOnSegments: z.boolean().optional().describe("Also insert elevation points where a COGO point lies on a segment but not on a vertex (default false, reported only)."),
+  pointGroupName: z.string().optional().describe("Restrict the COGO search to one point group."),
+  dryRun: z.boolean().optional().describe("feature_line_create_from_layer: report the vertex/COGO matches without creating anything."),
+  objectHandle: z.string().optional().describe("feature_line_create_from_object: handle of the line/arc/polyline/3D polyline."),
+  siteName: z.string().optional(),
+  style: z.string().optional(),
+  elevationSurface: z.string().optional().describe("Assign elevations from this surface after creation."),
+  includeIntermediatePoints: z.boolean().optional(),
+  eraseSource: z.boolean().optional(),
+  elevation: z.number().optional(),
+  closed: z.boolean().optional(),
+  operation: z.string().optional().describe("feature_line_edit: insert_pi | insert_elevation_point | delete_pi | delete_elevation_point | set_elevation | set_all_elevations | raise_lower | elevations_from_surface | set_curve_radius | set_style | move_to_site | rename"),
+  x: z.number().optional(), y: z.number().optional(), z: z.number().optional(),
+  pointIndex: z.number().int().nonnegative().optional(),
+  curveIndex: z.number().int().nonnegative().optional(),
+  radius: z.number().positive().optional(),
+  delta: z.number().optional(),
+  newName: z.string().optional(),
   name: z.string().optional(),
   description: z.string().optional(),
   useProjection: z.boolean().optional(),
@@ -65,6 +93,70 @@ const canonicalGradingInputShape = {
   points: z.array(Point3DSchema).optional(),
   layer: z.string().optional(),
 };
+
+const FeatureLineCreateFromObjectArgsSchema = z.object({
+  action: z.literal("feature_line_create_from_object"),
+  objectHandle: z.string(),
+  name: z.string().optional(),
+  siteName: z.string().optional(),
+  style: z.string().optional(),
+  layer: z.string().optional(),
+  elevationSurface: z.string().optional(),
+  includeIntermediatePoints: z.boolean().optional(),
+  eraseSource: z.boolean().optional(),
+  elevation: z.number().optional().describe("Constant elevation for every point (when no surface)."),
+});
+
+const FeatureLineCreateFromLayerArgsSchema = z.object({
+  action: z.literal("feature_line_create_from_layer"),
+  sourceLayer: z.string(),
+  namePrefix: z.string().optional(),
+  names: z.array(z.string()).optional(),
+  siteName: z.string().optional(),
+  style: z.string().optional(),
+  layer: z.string().optional().describe("Layer for the new feature lines."),
+  eraseSource: z.boolean().optional(),
+  elevationsFrom: z.enum(["cogo", "surface", "none"]).optional(),
+  elevationSurface: z.string().optional(),
+  tolerance: z.number().positive().optional(),
+  addElevationPointsOnSegments: z.boolean().optional(),
+  pointGroupName: z.string().optional(),
+  dryRun: z.boolean().optional(),
+});
+
+const FeatureLineElevationsFromCogoArgsSchema = z.object({
+  action: z.literal("feature_line_elevations_from_cogo"),
+  name: z.string().optional(),
+  featureLineName: z.string().optional(),
+  handle: z.string().optional(),
+  tolerance: z.number().positive().optional(),
+  addElevationPointsOnSegments: z.boolean().optional(),
+  pointGroupName: z.string().optional(),
+});
+
+const FeatureLinePointsArgsSchema = z.object({
+  action: z.literal("feature_line_points"),
+  name: z.string().optional(),
+  handle: z.string().optional(),
+}).refine((v) => v.name !== undefined || v.handle !== undefined, { message: "name or handle is required." });
+
+const FeatureLineEditArgsSchema = z.object({
+  action: z.literal("feature_line_edit"),
+  name: z.string().optional(),
+  handle: z.string().optional(),
+  operation: z.enum(["insert_pi", "insert_elevation_point", "delete_pi", "delete_elevation_point", "set_elevation", "set_all_elevations", "raise_lower", "elevations_from_surface", "set_curve_radius", "set_style", "move_to_site", "rename"]),
+  x: z.number().optional(), y: z.number().optional(), z: z.number().optional(),
+  pointIndex: z.number().int().nonnegative().optional(),
+  elevation: z.number().optional(),
+  delta: z.number().optional(),
+  surfaceName: z.string().optional(),
+  includeIntermediatePoints: z.boolean().optional(),
+  curveIndex: z.number().int().nonnegative().optional(),
+  radius: z.number().positive().optional(),
+  style: z.string().optional(),
+  siteName: z.string().optional(),
+  newName: z.string().optional(),
+}).refine((v) => v.name !== undefined || v.handle !== undefined, { message: "name or handle is required." });
 
 const GradingGroupListArgsSchema = z.object({
   action: z.literal("group_list"),
@@ -348,13 +440,89 @@ export const GRADING_DOMAIN_DEFINITION: DomainToolDefinition = {
       capabilities: ["create"],
       requiresActiveDrawing: true,
       safeForRetry: false,
-      pluginMethods: ["createFeatureLine"],
+      pluginMethods: ["featureLineCreateFromPoints"],
       execute: async (args) => await withApplicationConnection(
-        async (appClient) => await appClient.sendCommand("createFeatureLine", {
+        async (appClient) => await appClient.sendCommand("featureLineCreateFromPoints", {
           points: args.points,
-          name: args.name ?? null,
-          layer: args.layer ?? "0",
+          name: args.name ?? "Feature Line",
+          layer: args.layer ?? null,
+          siteName: (args as { siteName?: string }).siteName ?? null,
+          style: (args as { style?: string }).style ?? null,
+          closed: (args as { closed?: boolean }).closed ?? false,
+          elevationSurface: (args as { elevationSurface?: string }).elevationSurface ?? null,
         }),
+      ),
+    },
+    feature_line_create_from_object: {
+      action: "feature_line_create_from_object",
+      inputSchema: FeatureLineCreateFromObjectArgsSchema,
+      responseSchema: GenericGradingResponseSchema,
+      capabilities: ["create"],
+      requiresActiveDrawing: true,
+      safeForRetry: false,
+      pluginMethods: ["featureLineCreateFromObject"],
+      execute: async (args) => await withApplicationConnection(
+        async (appClient) => {
+          const { action: _action, ...rest } = args;
+          return await appClient.sendCommand("featureLineCreateFromObject", rest);
+        },
+      ),
+    },
+    feature_line_create_from_layer: {
+      action: "feature_line_create_from_layer",
+      inputSchema: FeatureLineCreateFromLayerArgsSchema,
+      responseSchema: GenericGradingResponseSchema,
+      capabilities: ["create"],
+      requiresActiveDrawing: true,
+      safeForRetry: false,
+      pluginMethods: ["featureLineCreateFromLayer"],
+      execute: async (args) => await withApplicationConnection(
+        async (appClient) => {
+          const { action: _action, ...rest } = args;
+          return await appClient.sendCommand("featureLineCreateFromLayer", rest);
+        },
+      ),
+    },
+    feature_line_elevations_from_cogo: {
+      action: "feature_line_elevations_from_cogo",
+      inputSchema: FeatureLineElevationsFromCogoArgsSchema,
+      responseSchema: GenericGradingResponseSchema,
+      capabilities: ["edit"],
+      requiresActiveDrawing: true,
+      safeForRetry: false,
+      pluginMethods: ["featureLineElevationsFromCogo"],
+      execute: async (args) => await withApplicationConnection(
+        async (appClient) => {
+          const { action: _action, featureLineName, ...rest } = args;
+          return await appClient.sendCommand("featureLineElevationsFromCogo", { ...rest, name: rest.name ?? featureLineName });
+        },
+      ),
+    },
+    feature_line_points: {
+      action: "feature_line_points",
+      inputSchema: FeatureLinePointsArgsSchema,
+      responseSchema: GenericGradingResponseSchema,
+      capabilities: ["query", "inspect"],
+      requiresActiveDrawing: true,
+      safeForRetry: true,
+      pluginMethods: ["featureLinePoints"],
+      execute: async (args) => await withApplicationConnection(
+        async (appClient) => await appClient.sendCommand("featureLinePoints", { name: args.name ?? null, handle: args.handle ?? null }),
+      ),
+    },
+    feature_line_edit: {
+      action: "feature_line_edit",
+      inputSchema: FeatureLineEditArgsSchema,
+      responseSchema: GenericGradingResponseSchema,
+      capabilities: ["edit"],
+      requiresActiveDrawing: true,
+      safeForRetry: false,
+      pluginMethods: ["featureLineEdit"],
+      execute: async (args) => await withApplicationConnection(
+        async (appClient) => {
+          const { action: _action, ...rest } = args;
+          return await appClient.sendCommand("featureLineEdit", rest);
+        },
       ),
     },
   },
@@ -380,6 +548,11 @@ export const GRADING_DOMAIN_DEFINITION: DomainToolDefinition = {
         "feature_line_get",
         "feature_line_export_as_polyline",
         "feature_line_create",
+        "feature_line_create_from_object",
+        "feature_line_create_from_layer",
+        "feature_line_elevations_from_cogo",
+        "feature_line_points",
+        "feature_line_edit",
       ],
       resolveAction: (rawArgs) => ({
         action: String(rawArgs.action ?? ""),

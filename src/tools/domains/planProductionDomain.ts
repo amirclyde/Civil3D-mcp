@@ -2,30 +2,17 @@ import { z } from "zod";
 import { withApplicationConnection } from "../../utils/ConnectionManager.js";
 import type { DomainToolDefinition } from "../domainRuntime.js";
 
-const SheetSummarySchema = z.object({
-  name: z.string(),
-  number: z.string(),
-  handle: z.string(),
-  layoutName: z.string().nullable(),
-});
-
 const SheetSetSummarySchema = z.object({
   name: z.string(),
   handle: z.string(),
-  description: z.string().nullable(),
+  alignmentName: z.string().nullable().optional(),
+  viewFrameCount: z.number().optional(),
+  matchLineCount: z.number().optional(),
+  sheetSets: z.array(z.string()).optional(),
   sheetCount: z.number(),
-});
+}).passthrough();
 
-const SheetDetailSchema = z.object({
-  name: z.string(),
-  number: z.string(),
-  handle: z.string(),
-  layoutName: z.string().nullable(),
-  viewportScale: z.number().nullable(),
-  alignmentName: z.string().nullable(),
-  profileName: z.string().nullable(),
-  titleBlock: z.string().nullable(),
-});
+const SheetDetailSchema = z.object({}).passthrough();
 
 const GenericPlanProductionResponseSchema = z.object({}).passthrough();
 
@@ -38,11 +25,13 @@ const canonicalPlanProductionInputShape = {
     "sheet_get_properties",
     "sheet_set_title_block",
     "plan_profile_sheet_update_alignment",
+    "layout_list",
+    "layout_create",
     "sheet_view_create",
     "sheet_view_set_scale",
     "sheet_publish_pdf",
     "sheet_set_export",
-  ]),
+  ]).describe("sheet_set_* read Civil 3D view frame groups / view frames (read-only in the API; created by the CreateViewFrames / CreateSheets wizards). layout_* and sheet_view_* build paper-space layouts and viewports directly."),
   name: z.string().optional(),
   description: z.string().optional(),
   sheetSetName: z.string().optional(),
@@ -63,6 +52,14 @@ const canonicalPlanProductionInputShape = {
   height: z.number().optional(),
   scale: z.number().optional(),
   viewportHandle: z.string().optional(),
+  templatePath: z.string().optional().describe("layout_create: .dwt/.dwg whose layout (templateLayoutName) is imported with its title block."),
+  templateLayoutName: z.string().optional(),
+  makeCurrent: z.boolean().optional(),
+  includeViewports: z.boolean().optional(),
+  viewCenterX: z.number().optional().describe("sheet_view_create / set_scale: model-space X the viewport looks at."),
+  viewCenterY: z.number().optional(),
+  twistDegrees: z.number().optional(),
+  locked: z.boolean().optional(),
   layoutNames: z.array(z.string()).optional(),
   outputPath: z.string().optional(),
   overwrite: z.boolean().optional(),
@@ -125,6 +122,19 @@ const PlanProfileSheetUpdateAlignmentArgsSchema = z.object({
   profileName: z.string().optional(),
 });
 
+const LayoutListArgsSchema = z.object({
+  action: z.literal("layout_list"),
+  includeViewports: z.boolean().optional(),
+});
+
+const LayoutCreateArgsSchema = z.object({
+  action: z.literal("layout_create"),
+  layoutName: z.string(),
+  templatePath: z.string().optional(),
+  templateLayoutName: z.string().optional(),
+  makeCurrent: z.boolean().optional(),
+});
+
 const SheetViewCreateArgsSchema = z.object({
   action: z.literal("sheet_view_create"),
   layoutName: z.string(),
@@ -133,7 +143,11 @@ const SheetViewCreateArgsSchema = z.object({
   centerY: z.number().optional(),
   width: z.number().optional(),
   height: z.number().optional(),
-  scale: z.number().optional(),
+  scale: z.number().positive().optional(),
+  viewCenterX: z.number().optional(),
+  viewCenterY: z.number().optional(),
+  twistDegrees: z.number().optional(),
+  locked: z.boolean().optional(),
 });
 
 const SheetViewSetScaleArgsSchema = z.object({
@@ -141,6 +155,8 @@ const SheetViewSetScaleArgsSchema = z.object({
   layoutName: z.string(),
   viewportHandle: z.string().optional(),
   scale: z.number().positive(),
+  viewCenterX: z.number().optional(),
+  viewCenterY: z.number().optional(),
 });
 
 const SheetPublishPdfArgsSchema = z.object({
@@ -166,7 +182,7 @@ export const PLAN_PRODUCTION_DOMAIN_DEFINITION: DomainToolDefinition = {
     sheet_set_list: {
       action: "sheet_set_list",
       inputSchema: SheetSetListArgsSchema,
-      responseSchema: z.object({ sheetSets: z.array(SheetSetSummarySchema) }),
+      responseSchema: z.object({ sheetSets: z.array(SheetSetSummarySchema), viewFrameGroups: z.array(SheetSetSummarySchema).optional(), note: z.string().optional() }),
       capabilities: ["query", "inspect"],
       requiresActiveDrawing: true,
       safeForRetry: true,
@@ -178,11 +194,9 @@ export const PLAN_PRODUCTION_DOMAIN_DEFINITION: DomainToolDefinition = {
     sheet_set_get_info: {
       action: "sheet_set_get_info",
       inputSchema: SheetSetGetInfoArgsSchema,
-      responseSchema: z.object({
-        name: z.string(),
-        handle: z.string(),
-        description: z.string().nullable(),
-        sheets: z.array(SheetSummarySchema),
+      responseSchema: SheetSetSummarySchema.extend({
+        viewFrames: z.array(z.object({}).passthrough()).optional(),
+        matchLines: z.array(z.object({}).passthrough()).optional(),
       }),
       capabilities: ["query", "inspect"],
       requiresActiveDrawing: true,
@@ -298,10 +312,41 @@ export const PLAN_PRODUCTION_DOMAIN_DEFINITION: DomainToolDefinition = {
         }),
       ),
     },
+    layout_list: {
+      action: "layout_list",
+      inputSchema: LayoutListArgsSchema,
+      responseSchema: GenericPlanProductionResponseSchema,
+      capabilities: ["query", "inspect"],
+      requiresActiveDrawing: true,
+      safeForRetry: true,
+      pluginMethods: ["listLayouts"],
+      execute: async (args) => await withApplicationConnection(
+        async (appClient) => await appClient.sendCommand("listLayouts", {
+          includeViewports: args.includeViewports ?? true,
+        }),
+      ),
+    },
+    layout_create: {
+      action: "layout_create",
+      inputSchema: LayoutCreateArgsSchema,
+      responseSchema: GenericPlanProductionResponseSchema,
+      capabilities: ["create"],
+      requiresActiveDrawing: true,
+      safeForRetry: false,
+      pluginMethods: ["createLayout"],
+      execute: async (args) => await withApplicationConnection(
+        async (appClient) => await appClient.sendCommand("createLayout", {
+          layoutName: args.layoutName,
+          templatePath: args.templatePath ?? null,
+          templateLayoutName: args.templateLayoutName ?? null,
+          makeCurrent: args.makeCurrent ?? false,
+        }),
+      ),
+    },
     sheet_view_create: {
       action: "sheet_view_create",
       inputSchema: SheetViewCreateArgsSchema,
-      responseSchema: z.object({ handle: z.string(), layoutName: z.string(), scale: z.number().nullable(), created: z.boolean() }),
+      responseSchema: GenericPlanProductionResponseSchema,
       capabilities: ["create"],
       requiresActiveDrawing: true,
       safeForRetry: false,
@@ -309,19 +354,23 @@ export const PLAN_PRODUCTION_DOMAIN_DEFINITION: DomainToolDefinition = {
       execute: async (args) => await withApplicationConnection(
         async (appClient) => await appClient.sendCommand("createSheetView", {
           layoutName: args.layoutName,
-          viewName: args.viewName,
-          centerX: args.centerX,
-          centerY: args.centerY,
-          width: args.width,
-          height: args.height,
-          scale: args.scale,
+          viewName: args.viewName ?? null,
+          centerX: args.centerX ?? null,
+          centerY: args.centerY ?? null,
+          width: args.width ?? null,
+          height: args.height ?? null,
+          scale: args.scale ?? null,
+          viewCenterX: args.viewCenterX ?? null,
+          viewCenterY: args.viewCenterY ?? null,
+          twistDegrees: args.twistDegrees ?? null,
+          locked: args.locked ?? true,
         }),
       ),
     },
     sheet_view_set_scale: {
       action: "sheet_view_set_scale",
       inputSchema: SheetViewSetScaleArgsSchema,
-      responseSchema: z.object({ handle: z.string(), scale: z.number(), updated: z.boolean() }),
+      responseSchema: GenericPlanProductionResponseSchema,
       capabilities: ["edit"],
       requiresActiveDrawing: true,
       safeForRetry: false,
@@ -329,8 +378,10 @@ export const PLAN_PRODUCTION_DOMAIN_DEFINITION: DomainToolDefinition = {
       execute: async (args) => await withApplicationConnection(
         async (appClient) => await appClient.sendCommand("setSheetViewScale", {
           layoutName: args.layoutName,
-          viewportHandle: args.viewportHandle,
+          viewportHandle: args.viewportHandle ?? null,
           scale: args.scale,
+          viewCenterX: args.viewCenterX ?? null,
+          viewCenterY: args.viewCenterY ?? null,
         }),
       ),
     },
@@ -379,7 +430,7 @@ export const PLAN_PRODUCTION_DOMAIN_DEFINITION: DomainToolDefinition = {
     {
       toolName: "civil3d_plan_production",
       displayName: "Civil 3D Plan Production",
-      description: "Lists, creates, updates, and publishes Civil 3D sheet sets, sheets, plan/profile sheets, and sheet views through a single domain tool.",
+      description: "Plan production: reads Civil 3D view frame groups, view frames and match lines (sheet_set_*; read-only in the Civil 3D API), and builds paper-space layouts from sheet templates and viewports at a given scale (layout_list, layout_create, sheet_view_create, sheet_view_set_scale). Wizard-only operations (creating view frames or plan/profile/section sheets) are refused with guidance.",
       inputShape: canonicalPlanProductionInputShape,
       supportedActions: [
         "sheet_set_list",
@@ -389,6 +440,8 @@ export const PLAN_PRODUCTION_DOMAIN_DEFINITION: DomainToolDefinition = {
         "sheet_get_properties",
         "sheet_set_title_block",
         "plan_profile_sheet_update_alignment",
+        "layout_list",
+        "layout_create",
         "sheet_view_create",
         "sheet_view_set_scale",
         "sheet_publish_pdf",

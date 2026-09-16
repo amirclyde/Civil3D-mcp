@@ -51,6 +51,18 @@ public sealed class PluginEntry : IExtensionApplication
     WriteMessage("Civil3D MCP listener stopped.");
   }
 
+  /// <summary>
+  /// Runs the next work item queued by CivilExecution.ExecuteAsCommandAsync inside a real AutoCAD
+  /// command (posted with SendStringToExecute). Corridor-surface work needs the full command plumbing
+  /// that Civil 3D's own dialogs get; ExecuteInCommandContextAsync and application-context callbacks
+  /// left the command context hanging or the objects half-registered on 2026.2.
+  /// </summary>
+  [CommandMethod("C3DMCPRUNQUEUED", CommandFlags.Modal | CommandFlags.NoHistory)]
+  public void RunQueuedCommand()
+  {
+    CivilExecution.RunQueuedWorkItem();
+  }
+
   [CommandMethod("C3DMCPSTATUS")]
   public void StatusCommand()
   {

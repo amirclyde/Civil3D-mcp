@@ -44,7 +44,7 @@ public static class CorridorCommands
             ["assemblyName"] = CivilObjectUtils.GetName(transaction.GetObject(region.AssemblyId, OpenMode.ForRead)) ?? string.Empty,
             ["startStation"] = region.StartStation,
             ["endStation"] = region.EndStation,
-            ["frequency"] = 0,
+            ["frequency"] = ReadFrequencyAlongTangents(region),
           });
         }
 
@@ -253,6 +253,12 @@ public static class CorridorCommands
   }
 
   private static string GetCorridorState(Corridor corridor) => corridor.IsOutOfDate ? "out_of_date" : "built";
+
+  private static double? ReadFrequencyAlongTangents(BaselineRegion region)
+  {
+    try { return region.AppliedAssemblySetting.FrequencyAlongTangents; }
+    catch { return null; }
+  }
 
   private static Autodesk.Civil.DatabaseServices.Surface FindCorridorSurfaceByName(Corridor corridor, string name, Transaction transaction)
   {

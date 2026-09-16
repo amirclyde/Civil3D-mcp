@@ -119,8 +119,27 @@ const canonicalAlignmentInputShape = {
     "get_station_offset",
     "offset_create",
     "widen_transition",
+    "create_layout",
+    "entity_add",
+    "entity_delete",
+    "create_connected",
+    "offset_info",
   ]),
   name: z.string().optional(),
+  kind: z.string().optional().describe("entity_add: fixed_line | fixed_line_by_length | floating_line | free_line | fixed_curve | floating_curve | free_curve | free_scs | free_spiral | fixed_spiral | floating_spiral | free_sts"),
+  previousEntityIndex: z.number().int().nonnegative().optional(),
+  nextEntityIndex: z.number().int().nonnegative().optional(),
+  previousEntityId: z.number().int().optional(),
+  nextEntityId: z.number().int().optional(),
+  middleX: z.number().optional(), middleY: z.number().optional(), centerX: z.number().optional(), centerY: z.number().optional(),
+  isClockwise: z.boolean().optional(), isGreaterThan180: z.boolean().optional(),
+  curveType: z.enum(["compound", "reverse"]).optional(),
+  curveParamType: z.string().optional(), curveParamValue: z.number().optional(),
+  spiralInLength: z.number().optional(), spiralOutLength: z.number().optional(), spiralInA: z.number().optional(), spiralOutA: z.number().optional(),
+  spiralCurveType: z.enum(["in", "out"]).optional(),
+  description: z.string().optional(),
+  incomingAlignmentName: z.string().optional(), incomingStation: z.number().optional(), outgoingAlignmentName: z.string().optional(), outgoingStation: z.number().optional(),
+  offsetIn: z.number().optional(), offsetOut: z.number().optional(), overlapIn: z.number().optional(), overlapOut: z.number().optional(),
   station: z.number().optional(),
   offset: z.number().optional(),
   x: z.number().optional(),
@@ -140,7 +159,7 @@ const canonicalAlignmentInputShape = {
   passThroughX: z.number().optional(),
   passThroughY: z.number().optional(),
   radius: z.number().positive().optional(),
-  spiralType: z.enum(["clothoid", "cubic", "biquadratic"]).optional(),
+  spiralType: z.string().optional(),
   startRadius: z.number().optional(),
   endRadius: z.number().optional(),
   length: z.number().positive().optional(),
@@ -153,6 +172,11 @@ const canonicalAlignmentInputShape = {
   endStation: z.number().optional(),
   startOffset: z.number().optional(),
   endOffset: z.number().optional(),
+  wideningOffset: z.number().optional(),
+  offsetProfileName: z.string().optional(),
+  offsetProfileSlope: z.number().optional(),
+  offsetProfileStyle: z.string().optional(),
+  parentProfileName: z.string().optional(),
 };
 
 const AlignmentListArgsSchema = z.object({
@@ -200,6 +224,77 @@ const AlignmentReportArgsSchema = z.object({
   interval: z.number().positive().optional(),
   offset: z.number().optional(),
   maximumSamples: z.number().int().positive().max(200).optional(),
+});
+
+const AlignmentCreateLayoutArgsSchema = z.object({
+  action: z.literal("create_layout"),
+  name: z.string(),
+  site: z.string().optional(),
+  style: z.string().optional(),
+  layer: z.string().optional(),
+  labelSet: z.string().optional(),
+  startStation: z.number().optional(),
+  description: z.string().optional(),
+});
+
+const AlignmentEntityAddArgsSchema = z.object({
+  action: z.literal("entity_add"),
+  name: z.string(),
+  kind: z.enum(["fixed_line", "fixed_line_by_length", "floating_line", "free_line", "fixed_curve", "floating_curve", "free_curve", "free_scs", "free_spiral", "fixed_spiral", "floating_spiral", "free_sts"]),
+  previousEntityIndex: z.number().int().nonnegative().optional().describe("0-based order along the alignment; falls back to collection index for not-yet-connected entities."),
+  nextEntityIndex: z.number().int().nonnegative().optional(),
+  previousEntityId: z.number().int().optional().describe("Civil 3D entity id (entities[].entityId) — unambiguous for disconnected entities."),
+  nextEntityId: z.number().int().optional(),
+  startX: z.number().optional(), startY: z.number().optional(),
+  endX: z.number().optional(), endY: z.number().optional(),
+  middleX: z.number().optional(), middleY: z.number().optional(),
+  centerX: z.number().optional(), centerY: z.number().optional(),
+  passThroughX: z.number().optional(), passThroughY: z.number().optional(),
+  radius: z.number().positive().optional(),
+  startRadius: z.number().optional(), endRadius: z.number().optional(),
+  length: z.number().positive().optional(),
+  isClockwise: z.boolean().optional(),
+  isGreaterThan180: z.boolean().optional(),
+  curveType: z.enum(["compound", "reverse"]).optional(),
+  curveParamType: z.enum(["curve_length", "tangent_length", "chord_length", "curve_angle", "external", "middle_ordinate", "degree_of_curve", "radius"]).optional(),
+  curveParamValue: z.number().optional(),
+  spiralInLength: z.number().positive().optional(), spiralOutLength: z.number().positive().optional(),
+  spiralInA: z.number().positive().optional(), spiralOutA: z.number().positive().optional(),
+  spiralType: z.string().optional(),
+  spiralCurveType: z.enum(["in", "out"]).optional(),
+});
+
+const AlignmentOffsetInfoArgsSchema = z.object({
+  action: z.literal("offset_info"),
+  name: z.string(),
+});
+
+const AlignmentEntityDeleteArgsSchema = z.object({
+  action: z.literal("entity_delete"),
+  name: z.string(),
+  entityIndex: z.number().int().nonnegative(),
+});
+
+const AlignmentCreateConnectedArgsSchema = z.object({
+  action: z.literal("create_connected"),
+  name: z.string(),
+  incomingAlignmentName: z.string(),
+  incomingStation: z.number(),
+  outgoingAlignmentName: z.string(),
+  outgoingStation: z.number(),
+  radius: z.number().positive(),
+  offsetIn: z.number().optional(),
+  offsetOut: z.number().optional(),
+  overlapIn: z.number().optional(),
+  overlapOut: z.number().optional(),
+  spiralInLength: z.number().positive().optional(),
+  spiralOutLength: z.number().positive().optional(),
+  spiralType: z.string().optional(),
+  isGreaterThan180: z.boolean().optional(),
+  site: z.string().optional(),
+  style: z.string().optional(),
+  layer: z.string().optional(),
+  labelSet: z.string().optional(),
 });
 
 const AlignmentAddTangentArgsSchema = z.object({
@@ -252,24 +347,32 @@ const AlignmentGetStationOffsetArgsSchema = z.object({
 
 const AlignmentOffsetCreateArgsSchema = z.object({
   action: z.literal("offset_create"),
-  name: z.string(),
+  name: z.string().describe("Parent alignment."),
   offsetName: z.string(),
-  offset: z.number(),
+  offset: z.number().describe("Signed offset: positive = right of the parent, negative = left."),
+  startStation: z.number().optional(),
+  endStation: z.number().optional(),
   style: z.string().optional(),
   layer: z.string().optional(),
   labelSet: z.string().optional(),
+  offsetProfileName: z.string().optional().describe("Also create an offset profile (needs offsetProfileSlope; parent must have a design profile)."),
+  offsetProfileSlope: z.number().optional().describe("Decimal cross slope from the parent profile to the offset, e.g. -0.025."),
+  offsetProfileStyle: z.string().optional(),
+  parentProfileName: z.string().optional().describe("Parent design profile the offset profile follows (default: the parent's only design profile)."),
 });
 
 const AlignmentWidenTransitionArgsSchema = z.object({
   action: z.literal("widen_transition"),
-  name: z.string(),
-  side: z.enum(["left", "right"]),
+  name: z.string().describe("An offset alignment, or the parent alignment (then give offsetName of an existing offset, or startOffset to create one)."),
   startStation: z.number(),
   endStation: z.number(),
-  startOffset: z.number(),
-  endOffset: z.number(),
+  wideningOffset: z.number().optional().describe("Signed offset from the parent inside the widened region (same side as the offset alignment)."),
+  endOffset: z.number().optional().describe("Alias of wideningOffset."),
+  startOffset: z.number().optional().describe("Nominal offset used to create the offset alignment when it does not exist yet."),
   offsetName: z.string().optional(),
-});
+  side: z.enum(["left", "right"]).optional(),
+  style: z.string().optional(),
+}).refine((v) => v.wideningOffset !== undefined || v.endOffset !== undefined, { message: "wideningOffset is required." });
 
 function buildStationSequence(startStation: number, endStation: number, interval: number, maximumSamples: number) {
   const stations: number[] = [];
@@ -450,6 +553,75 @@ export const ALIGNMENT_DOMAIN_DEFINITION: DomainToolDefinition = {
         };
       }),
     },
+    create_layout: {
+      action: "create_layout",
+      inputSchema: AlignmentCreateLayoutArgsSchema,
+      responseSchema: GenericAlignmentResponseSchema,
+      capabilities: ["create"],
+      requiresActiveDrawing: true,
+      safeForRetry: false,
+      pluginMethods: ["alignmentCreateLayout"],
+      execute: async (args) => await withApplicationConnection(
+        async (appClient) => await appClient.sendCommand("alignmentCreateLayout", {
+          name: args.name, site: args.site ?? null, style: args.style ?? null, layer: args.layer ?? null,
+          labelSet: args.labelSet ?? null, startStation: args.startStation ?? null, description: args.description ?? null,
+        }),
+      ),
+    },
+    entity_add: {
+      action: "entity_add",
+      inputSchema: AlignmentEntityAddArgsSchema,
+      responseSchema: GenericAlignmentResponseSchema,
+      capabilities: ["create", "edit"],
+      requiresActiveDrawing: true,
+      safeForRetry: false,
+      pluginMethods: ["alignmentEntityAdd"],
+      execute: async (args) => await withApplicationConnection(
+        async (appClient) => {
+          const { action: _action, name, ...rest } = args;
+          return await appClient.sendCommand("alignmentEntityAdd", { alignmentName: name, ...rest });
+        },
+      ),
+    },
+    offset_info: {
+      action: "offset_info",
+      inputSchema: AlignmentOffsetInfoArgsSchema,
+      responseSchema: GenericAlignmentResponseSchema,
+      capabilities: ["query", "inspect"],
+      requiresActiveDrawing: true,
+      safeForRetry: true,
+      pluginMethods: ["alignmentOffsetInfo"],
+      execute: async (args) => await withApplicationConnection(
+        async (appClient) => await appClient.sendCommand("alignmentOffsetInfo", { alignmentName: args.name }),
+      ),
+    },
+    entity_delete: {
+      action: "entity_delete",
+      inputSchema: AlignmentEntityDeleteArgsSchema,
+      responseSchema: GenericAlignmentResponseSchema,
+      capabilities: ["edit", "delete"],
+      requiresActiveDrawing: true,
+      safeForRetry: false,
+      pluginMethods: ["alignmentEntityDelete"],
+      execute: async (args) => await withApplicationConnection(
+        async (appClient) => await appClient.sendCommand("alignmentEntityDelete", { alignmentName: args.name, entityIndex: args.entityIndex }),
+      ),
+    },
+    create_connected: {
+      action: "create_connected",
+      inputSchema: AlignmentCreateConnectedArgsSchema,
+      responseSchema: GenericAlignmentResponseSchema,
+      capabilities: ["create"],
+      requiresActiveDrawing: true,
+      safeForRetry: false,
+      pluginMethods: ["alignmentCreateConnected"],
+      execute: async (args) => await withApplicationConnection(
+        async (appClient) => {
+          const { action: _action, ...rest } = args;
+          return await appClient.sendCommand("alignmentCreateConnected", rest);
+        },
+      ),
+    },
     add_tangent: {
       action: "add_tangent",
       inputSchema: AlignmentAddTangentArgsSchema,
@@ -565,9 +737,15 @@ export const ALIGNMENT_DOMAIN_DEFINITION: DomainToolDefinition = {
           alignmentName: args.name,
           offsetName: args.offsetName,
           offset: args.offset,
-          style: args.style,
-          layer: args.layer,
-          labelSet: args.labelSet,
+          startStation: args.startStation ?? null,
+          endStation: args.endStation ?? null,
+          style: args.style ?? null,
+          layer: args.layer ?? null,
+          labelSet: args.labelSet ?? null,
+          offsetProfileName: args.offsetProfileName ?? null,
+          offsetProfileSlope: args.offsetProfileSlope ?? null,
+          offsetProfileStyle: args.offsetProfileStyle ?? null,
+          parentProfileName: args.parentProfileName ?? null,
         }),
       ),
     },
@@ -582,12 +760,13 @@ export const ALIGNMENT_DOMAIN_DEFINITION: DomainToolDefinition = {
       execute: async (args) => await withApplicationConnection(
         async (appClient) => await appClient.sendCommand("alignmentWidenTransition", {
           alignmentName: args.name,
-          side: args.side,
+          side: args.side ?? null,
           startStation: args.startStation,
           endStation: args.endStation,
-          startOffset: args.startOffset,
-          endOffset: args.endOffset,
-          offsetName: args.offsetName,
+          wideningOffset: args.wideningOffset ?? args.endOffset ?? null,
+          startOffset: args.startOffset ?? null,
+          offsetName: args.offsetName ?? null,
+          style: args.style ?? null,
         }),
       ),
     },
@@ -613,6 +792,11 @@ export const ALIGNMENT_DOMAIN_DEFINITION: DomainToolDefinition = {
         "get_station_offset",
         "offset_create",
         "widen_transition",
+        "create_layout",
+        "entity_add",
+        "entity_delete",
+        "create_connected",
+        "offset_info",
       ],
       resolveAction: (rawArgs) => ({
         action: String(rawArgs.action ?? ""),
@@ -780,13 +964,13 @@ export const ALIGNMENT_DOMAIN_DEFINITION: DomainToolDefinition = {
     {
       toolName: "civil3d_alignment_widen_transition",
       displayName: "Civil 3D Alignment Widen Transition",
-      description: "Creates a variable-offset widening or narrowing transition region on a Civil 3D alignment.",
+      description: "Adds a widening region (with entry/exit transitions) to an offset alignment; creates the offset alignment from startOffset when it does not exist yet. Offsets are signed: + right / - left.",
       inputShape: {
         alignmentName: z.string(),
-        side: z.enum(["left", "right"]),
+        side: z.enum(["left", "right"]).optional(),
         startStation: z.number(),
         endStation: z.number(),
-        startOffset: z.number(),
+        startOffset: z.number().optional(),
         endOffset: z.number(),
         offsetName: z.string().optional(),
       },

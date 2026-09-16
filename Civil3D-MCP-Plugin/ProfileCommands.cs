@@ -52,6 +52,7 @@ public static class ProfileCommands
         ["entityCount"] = entities.Count,
         ["entities"] = entities,
         ["pviCount"] = CountPvis(profile),
+        ["pvis"] = ReadPvis(profile),
         ["units"] = new Dictionary<string, object?>
         {
           ["horizontal"] = CivilObjectUtils.LinearUnits(database),
@@ -208,15 +209,13 @@ public static class ProfileCommands
     };
   }
 
-  private static List<Dictionary<string, object?>> ReadProfileEntities(Profile profile)
+  internal static List<Dictionary<string, object?>> ReadProfileEntities(Profile profile)
   {
     var entities = new List<Dictionary<string, object?>>();
-    var index = 0;
     foreach (ProfileEntity entity in profile.Entities)
     {
-      entities.Add(new Dictionary<string, object?>
+      var item = new Dictionary<string, object?>
       {
-        ["index"] = index++,
         ["type"] = MapProfileEntityType(entity.EntityType.ToString()),
         ["entityType"] = entity.EntityType.ToString(),
         ["startStation"] = entity.StartStation,
@@ -225,10 +224,96 @@ public static class ProfileCommands
         ["endElevation"] = entity.EndElevation,
         ["grade"] = entity is ProfileTangent tangent ? tangent.Grade : null,
         ["length"] = entity.Length,
-      });
+      };
+
+      switch (entity)
+      {
+        case ProfileParabolaSymmetric sym:
+          item["pviStation"] = sym.PVIStation;
+          item["pviElevation"] = sym.PVIElevation;
+          item["gradeIn"] = sym.GradeIn;
+          item["gradeOut"] = sym.GradeOut;
+          item["gradeChange"] = sym.GradeChange;
+          item["k"] = sym.K;
+          item["curveType"] = sym.CurveType.ToString();
+          item["highLowPointStation"] = Try(() => sym.HighLowPointStation);
+          item["highLowPointElevation"] = Try(() => sym.HighLowPointElevation);
+          item["tangentOffsetAtPvi"] = Try(() => sym.TangentOffsetAtPVI);
+          break;
+        case ProfileParabolaAsymmetric asym:
+          item["pviStation"] = asym.PVIStation;
+          item["pviElevation"] = asym.PVIElevation;
+          item["gradeIn"] = asym.GradeIn;
+          item["gradeOut"] = asym.GradeOut;
+          item["gradeChange"] = asym.GradeChange;
+          item["k"] = asym.K;
+          item["curveType"] = asym.CurveType.ToString();
+          item["length1"] = asym.AsymmetricLength1;
+          item["length2"] = asym.AsymmetricLength2;
+          item["highLowPointStation"] = Try(() => asym.HighLowPointStation);
+          item["highLowPointElevation"] = Try(() => asym.HighLowPointElevation);
+          break;
+        case ProfileCircular circ:
+          item["pviStation"] = circ.PVIStation;
+          item["pviElevation"] = circ.PVIElevation;
+          item["gradeIn"] = circ.GradeIn;
+          item["gradeOut"] = circ.GradeOut;
+          item["gradeChange"] = circ.GradeChange;
+          item["k"] = circ.K;
+          item["radius"] = circ.Radius;
+          item["curveType"] = circ.CurveType.ToString();
+          item["highLowPointStation"] = Try(() => circ.HighLowPointStation);
+          item["highLowPointElevation"] = Try(() => circ.HighLowPointElevation);
+          break;
+      }
+      entities.Add(item);
     }
 
+    // Civil 3D returns entities in creation order; report them in station order.
+    entities.Sort((x, y) => ((double)x["startStation"]!).CompareTo((double)y["startStation"]!));
+    for (var i = 0; i < entities.Count; i++) entities[i]["index"] = i;
     return entities;
+  }
+
+  internal static List<Dictionary<string, object?>> ReadPvis(Profile profile)
+  {
+    var pvis = new List<Dictionary<string, object?>>();
+    foreach (ProfilePVI pvi in profile.PVIs) pvis.Add(ReadPvi(pvi));
+    pvis.Sort((x, y) => ((double)x["station"]!).CompareTo((double)y["station"]!));
+    for (var i = 0; i < pvis.Count; i++) pvis[i]["index"] = i;
+    return pvis;
+  }
+
+  internal static Dictionary<string, object?> ReadPvi(ProfilePVI pvi)
+  {
+    var item = new Dictionary<string, object?>
+    {
+      ["station"] = pvi.RawStation,
+      ["elevation"] = pvi.Elevation,
+      ["pviType"] = pvi.PVIType.ToString(),
+      ["gradeIn"] = Try(() => pvi.GradeIn),
+      ["gradeOut"] = Try(() => pvi.GradeOut),
+    };
+    var curve = pvi.VerticalCurve;
+    if (curve != null)
+    {
+      item["curveEntityType"] = curve.EntityType.ToString();
+      item["curveLength"] = curve.Length;
+      item["curveStartStation"] = curve.StartStation;
+      item["curveEndStation"] = curve.EndStation;
+      switch (curve)
+      {
+        case ProfileParabolaSymmetric sym: item["k"] = sym.K; break;
+        case ProfileParabolaAsymmetric asym: item["k"] = asym.K; item["length1"] = asym.AsymmetricLength1; item["length2"] = asym.AsymmetricLength2; break;
+        case ProfileCircular circ: item["k"] = circ.K; item["radius"] = circ.Radius; break;
+      }
+    }
+    return item;
+  }
+
+  private static double? Try(Func<double> read)
+  {
+    try { return read(); } catch { return null; }
   }
 
   private static (double Min, double Max) GetElevationExtents(Profile profile)

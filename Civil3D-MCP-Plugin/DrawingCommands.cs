@@ -108,28 +108,41 @@ public static class DrawingCommands
   public static Task<object?> SaveDrawingAsync(JsonObject? parameters)
   {
     var overwrite = PluginRuntime.GetOptionalBool(parameters, "overwrite") ?? false;
-    return CivilExecution.WriteAsync<object?>((doc, civilDoc, database, transaction) =>
+    var saveAs = PluginRuntime.GetOptionalString(parameters, "saveAs");
+    string? resolvedSaveAs = null;
+    if (!string.IsNullOrWhiteSpace(saveAs))
     {
-      var saveAs = PluginRuntime.GetOptionalString(parameters, "saveAs");
-      var targetPath = string.IsNullOrWhiteSpace(saveAs) ? database.Filename : saveAs;
-      if (string.IsNullOrWhiteSpace(targetPath))
+      resolvedSaveAs = FileBoundary.ResolveExportPath(saveAs, overwrite, ".dwg");
+    }
+
+    // Saving goes through Civil 3D's own QSAVE / SAVEAS commands inside a real command context.
+    // Calling Database.SaveAs on the open document's database (the previous implementation)
+    // re-registered the document under the hood: Civil 3D's per-document settings became
+    // unreadable afterwards and the file needed recovery when reopened (1748 errors, 1 object erased).
+    return CivilExecution.ExecuteAsCommandAsync<object?>((doc, civilDoc, database, _) =>
+    {
+      var editor = doc.Editor;
+      if (resolvedSaveAs == null)
       {
-        throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "saveDrawing requires 'saveAs' when the drawing has not been saved yet.");
+        if (string.IsNullOrWhiteSpace(database.Filename) || doc.IsNamedDrawing == false)
+        {
+          throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "saveDrawing requires 'saveAs' when the drawing has not been saved yet.");
+        }
+        editor.Command("_.QSAVE");
+        return new Dictionary<string, object?> { ["saved"] = true, ["filePath"] = database.Filename, ["via"] = "QSAVE" };
       }
 
-      // Saving the active drawing is not an export conflict: its current file
-      // necessarily exists. Boundary/overwrite checks apply only to Save As.
-      targetPath = string.IsNullOrWhiteSpace(saveAs)
-        ? Path.GetFullPath(targetPath)
-        : FileBoundary.ResolveExportPath(targetPath, overwrite, ".dwg");
-      database.SaveAs(targetPath, true, DwgVersion.Current, database.SecurityParameters);
-
-      return new Dictionary<string, object?>
+      var exists = File.Exists(resolvedSaveAs);
+      if (exists)
       {
-        ["saved"] = true,
-        ["filePath"] = targetPath,
-      };
-    });
+        editor.Command("_.SAVEAS", "_2018", resolvedSaveAs, "_Y");
+      }
+      else
+      {
+        editor.Command("_.SAVEAS", "_2018", resolvedSaveAs);
+      }
+      return new Dictionary<string, object?> { ["saved"] = true, ["filePath"] = resolvedSaveAs, ["via"] = "SAVEAS" };
+    }, write: false, wrapInTransaction: false);
   }
 
   public static async Task<object?> NewDrawingAsync(JsonObject? parameters)
