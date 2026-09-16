@@ -1,0 +1,160 @@
+{
+  "$comment": "UTNM alignment + long-section object styles (16 Sep 2026), from claude/utnm-alignment-profile-style-spec.md. Apply with civil3d_style library_apply {path: 'C:/Dev/Civil3D-mcp/styles/utnm/alignment-profile-styles.json'} (upsert). Markers first. Marker sizes with sizeType DrawingScale are in METRES of paper (0.002 = 2 mm). Known API limit: MarkerStyle.Orientation = OrientToObject is rejected by Civil 3D 2026 ('enum value 0 not valid') - after applying, open 'UTNM IP' in Toolspace and set Orientation to 'Orient to object' by hand so the tick follows the alignment.",
+  "styles": [
+    {
+      "family": "marker",
+      "name": "UTNM IP",
+      "description": "UTNM IP / geometry point marker: circle + tick, 2 mm. Set Orientation to 'Orient to object' in the UI (API rejects it).",
+      "display": {
+        "plan": { "Marker": { "visible": true, "color": "ByLayer", "layer": "0" } },
+        "model": { "Marker": { "visible": false } },
+        "profile": { "Marker": { "visible": false } },
+        "section": { "Marker": { "visible": false } }
+      },
+      "properties": {
+        "markerType": "UseCustomMarker",
+        "customMarkerStyle": "CustomMarkerVLine",
+        "customMarkerSuperimposeStyle": "Circle",
+        "sizeType": "DrawingScale",
+        "markerSize": 0.002,
+        "orientation": "OrientToWCS"
+      }
+    },
+    {
+      "family": "marker",
+      "name": "UTNM PVI",
+      "description": "UTNM profile VIP marker: circle 2 mm",
+      "display": {
+        "plan": { "Marker": { "visible": false } },
+        "model": { "Marker": { "visible": false } },
+        "profile": { "Marker": { "visible": true, "color": "ByLayer", "layer": "0" } },
+        "section": { "Marker": { "visible": false } }
+      },
+      "properties": {
+        "markerType": "UseCustomMarker",
+        "customMarkerStyle": "CustomMarkerBlank",
+        "customMarkerSuperimposeStyle": "Circle",
+        "sizeType": "DrawingScale",
+        "markerSize": 0.002,
+        "orientation": "OrientToWCS"
+      }
+    },
+    {
+      "family": "marker",
+      "name": "UTNM PVC",
+      "description": "UTNM profile PVC/PVT marker: circle 1.5 mm",
+      "display": {
+        "plan": { "Marker": { "visible": false } },
+        "model": { "Marker": { "visible": false } },
+        "profile": { "Marker": { "visible": true, "color": "ByLayer", "layer": "0" } },
+        "section": { "Marker": { "visible": false } }
+      },
+      "properties": {
+        "markerType": "UseCustomMarker",
+        "customMarkerStyle": "CustomMarkerBlank",
+        "customMarkerSuperimposeStyle": "Circle",
+        "sizeType": "DrawingScale",
+        "markerSize": 0.0015,
+        "orientation": "OrientToWCS"
+      }
+    },
+    {
+      "family": "alignment",
+      "name": "UTNM-AlignmentStyle",
+      "description": "UTNM alignment: ByLayer line/curve/spiral, tangent extensions to the IPs in grey, circle+tick markers at IPs and geometry points",
+      "display": {
+        "plan": {
+          "Line": { "visible": true, "color": "ByLayer", "layer": "0", "lineweight": 0.35 },
+          "Curve": { "visible": true, "color": "ByLayer", "layer": "0", "lineweight": 0.35 },
+          "Spiral": { "visible": true, "color": "ByLayer", "layer": "0", "lineweight": 0.35 },
+          "Arrow": { "visible": false },
+          "LineExtensions": { "visible": false },
+          "CurveExtensions": { "visible": false },
+          "TangentExtensions": { "visible": true, "color": 8, "layer": "0", "linetype": "Continuous", "lineweight": 0.13 },
+          "WarningSymbol": { "visible": true }
+        },
+        "model": {
+          "Line": { "visible": true, "color": "ByLayer" },
+          "Curve": { "visible": true, "color": "ByLayer" },
+          "Spiral": { "visible": true, "color": "ByLayer" },
+          "Arrow": { "visible": false },
+          "TangentExtensions": { "visible": false }
+        }
+      },
+      "references": {
+        "beginPointMarkerStyle": "UTNM IP",
+        "endPointMarkerStyle": "UTNM IP",
+        "intersectionPointMarkerStyle": "UTNM IP",
+        "lineCurveIntersectPointMarkerStyle": "UTNM IP",
+        "curveLineIntersectPointMarkerStyle": "UTNM IP",
+        "lineSpiralIntersectPointMarkerStyle": "UTNM IP",
+        "spiralLineIntersectPointMarkerStyle": "UTNM IP",
+        "curveSpiralIntersectPointMarkerStyle": "UTNM IP",
+        "spiralCurveIntersectPointMarkerStyle": "UTNM IP",
+        "compoundCurveIntersectPointMarkerStyle": "UTNM IP",
+        "reverseCurveIntersectPointMarkerStyle": "UTNM IP",
+        "spiralSpiralIntersectPointMarkerStyle": "UTNM IP",
+        "reverseSpiralIntersectPointMarkerStyle": "UTNM IP",
+        "midPointMarkerStyle": "_No Markers",
+        "throughPointMarkerStyle": "_No Markers",
+        "stationReferencePointMarkerStyle": "_No Markers"
+      }
+    },
+    {
+      "family": "profile",
+      "name": "UTNM Design Profile",
+      "description": "UTNM design profile: red line, grey tangent extensions through the VIPs, circle markers at VIP and PVC/PVT",
+      "display": {
+        "profile": {
+          "Line": { "visible": true, "color": 1, "layer": "0", "lineweight": 0.35 },
+          "Curve": { "visible": true, "color": 1, "layer": "0", "lineweight": 0.35 },
+          "SymmetricalParabola": { "visible": true, "color": 1, "layer": "0", "lineweight": 0.35 },
+          "AsymmetricalParabola": { "visible": true, "color": 1, "layer": "0", "lineweight": 0.35 },
+          "Arrow": { "visible": false },
+          "LineExtension": { "visible": true, "color": 8, "layer": "0", "lineweight": 0.13 },
+          "ParabolicCurveExtension": { "visible": true, "color": 8, "layer": "0", "lineweight": 0.13 },
+          "WarningSymbol": { "visible": true }
+        }
+      },
+      "references": {
+        "beginPointMarkerStyle": "UTNM PVI",
+        "endPointMarkerStyle": "UTNM PVI",
+        "vIntersectionPointMarkerStyle": "UTNM PVI",
+        "vTangentCurveIntersectPointMarkerStyle": "UTNM PVC",
+        "vCurveTangentIntersectPointMarkerStyle": "UTNM PVC",
+        "vCompoundCurveIntersectPointMarkerStyle": "UTNM PVC",
+        "vReverseCurveIntersectPointMarkerStyle": "UTNM PVC",
+        "highPointMarkerStyle": "_No Markers",
+        "lowPointMarkerStyle": "_No Markers",
+        "throughPointMarkerStyle": "_No Markers"
+      }
+    },
+    {
+      "family": "profile",
+      "name": "UTNM Existing Ground",
+      "description": "UTNM existing ground profile: green dashed, no markers",
+      "display": {
+        "profile": {
+          "Line": { "visible": true, "color": 3, "layer": "0", "linetype": "DASHED", "lineweight": 0.25 },
+          "Curve": { "visible": true, "color": 3, "layer": "0", "linetype": "DASHED", "lineweight": 0.25 },
+          "SymmetricalParabola": { "visible": true, "color": 3, "layer": "0", "linetype": "DASHED", "lineweight": 0.25 },
+          "AsymmetricalParabola": { "visible": true, "color": 3, "layer": "0", "linetype": "DASHED", "lineweight": 0.25 },
+          "Arrow": { "visible": false },
+          "LineExtension": { "visible": false },
+          "ParabolicCurveExtension": { "visible": false },
+          "WarningSymbol": { "visible": false }
+        }
+      },
+      "references": {
+        "beginPointMarkerStyle": "_No Markers",
+        "endPointMarkerStyle": "_No Markers",
+        "vIntersectionPointMarkerStyle": "_No Markers",
+        "vTangentCurveIntersectPointMarkerStyle": "_No Markers",
+        "vCurveTangentIntersectPointMarkerStyle": "_No Markers",
+        "highPointMarkerStyle": "_No Markers",
+        "lowPointMarkerStyle": "_No Markers",
+        "throughPointMarkerStyle": "_No Markers"
+      }
+    }
+  ]
+}

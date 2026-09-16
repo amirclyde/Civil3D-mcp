@@ -33,7 +33,16 @@ const ProfileEntitySchema = z.object({
   endElevation: z.number(),
   grade: z.number().nullable(),
   length: z.number(),
-});
+}).passthrough();
+
+const ProfilePviSchema = z.object({
+  index: z.number().optional(),
+  station: z.number(),
+  elevation: z.number(),
+  pviType: z.string().optional(),
+  gradeIn: z.number().nullable().optional(),
+  gradeOut: z.number().nullable().optional(),
+}).passthrough();
 
 const ProfileDetailResponseSchema = z.object({
   name: z.string(),
@@ -49,6 +58,7 @@ const ProfileDetailResponseSchema = z.object({
   entityCount: z.number(),
   entities: z.array(ProfileEntitySchema),
   pviCount: z.number(),
+  pvis: z.array(ProfilePviSchema).optional(),
   units: z.object({
     horizontal: z.string(),
     vertical: z.string(),
@@ -135,6 +145,47 @@ const ProfileCreateFromSurfaceArgsSchema = z.object({
   style: z.string().optional(),
   layer: z.string().optional(),
   labelSet: z.string().optional(),
+  offset: z.number().optional().describe("Sample the surface at this offset from the alignment (signed)."),
+  startStation: z.number().optional(),
+  endStation: z.number().optional(),
+});
+
+const ProfileCreateFromFileArgsSchema = z.object({
+  action: z.literal("create_from_file"),
+  alignmentName: z.string(),
+  profileName: z.string(),
+  filePath: z.string().optional().describe("Text file with one 'station elevation' pair per line (space, tab, comma or ; separated)."),
+  text: z.string().optional().describe("The lines themselves, instead of a file."),
+  stationColumn: z.number().int().nonnegative().optional(),
+  elevationColumn: z.number().int().nonnegative().optional(),
+  skipLines: z.number().int().nonnegative().optional(),
+  style: z.string().optional(),
+  layer: z.string().optional(),
+  labelSet: z.string().optional(),
+}).refine((v) => v.filePath !== undefined || v.text !== undefined, { message: "filePath or text is required." });
+
+const ProfileCopyArgsSchema = z.object({
+  action: z.literal("copy"),
+  alignmentName: z.string(),
+  profileName: z.string(),
+  newProfileName: z.string(),
+  style: z.string().optional(),
+  layer: z.string().optional(),
+  labelSet: z.string().optional(),
+});
+
+const ProfileViewCreateMultipleArgsSchema = z.object({
+  action: z.literal("view_create_multiple"),
+  alignmentName: z.string(),
+  profileViewName: z.string(),
+  insertX: z.number(),
+  insertY: z.number(),
+  lengthOfEachView: z.number().positive(),
+  maxViewsInRow: z.number().int().positive().optional(),
+  gapBetweenViewsInRow: z.number().nonnegative().optional(),
+  gapBetweenViewsInColumn: z.number().nonnegative().optional(),
+  style: z.string().optional(),
+  bandSet: z.string().optional(),
 });
 
 const ProfileCreateLayoutArgsSchema = z.object({
@@ -168,7 +219,20 @@ const ProfileAddPviArgsSchema = z.object({
   profileName: z.string(),
   station: z.number(),
   elevation: z.number(),
+  curveLength: z.number().positive().optional().describe("Add a symmetric parabolic vertical curve of this length at the new PVI."),
+  curveLength1: z.number().positive().optional().describe("With curveLength2: asymmetric parabola tangent lengths before/after the PVI."),
+  curveLength2: z.number().positive().optional(),
+  radius: z.number().positive().optional().describe("Add a circular vertical curve of this radius at the new PVI."),
 });
+
+const ProfileMovePviArgsSchema = z.object({
+  action: z.literal("move_pvi"),
+  alignmentName: z.string(),
+  profileName: z.string(),
+  station: z.number().describe("Station of the existing PVI (within 0.5 m)."),
+  newStation: z.number().optional(),
+  newElevation: z.number().optional(),
+}).refine((v) => v.newStation !== undefined || v.newElevation !== undefined, { message: "newStation and/or newElevation is required." });
 
 const ProfileDeletePviArgsSchema = z.object({
   action: z.literal("delete_pvi"),
@@ -182,17 +246,22 @@ const ProfileAddCurveArgsSchema = z.object({
   alignmentName: z.string(),
   profileName: z.string(),
   pviStation: z.number(),
-  length: z.number().positive(),
-  curveType: z.enum(["symmetric_parabola", "asymmetric_parabola"]).optional().default("symmetric_parabola"),
+  curveType: z.enum(["symmetric_parabola", "asymmetric_parabola", "circular"]).optional().default("symmetric_parabola"),
+  length: z.number().positive().optional().describe("symmetric_parabola / circular: curve length."),
+  k: z.number().positive().optional().describe("symmetric_parabola: K value instead of length."),
+  length1: z.number().positive().optional().describe("asymmetric_parabola: tangent length before the PVI."),
+  length2: z.number().positive().optional().describe("asymmetric_parabola: tangent length after the PVI."),
+  radius: z.number().positive().optional().describe("circular: radius instead of length."),
 });
 
 const ProfileSetGradeArgsSchema = z.object({
   action: z.literal("set_grade"),
   alignmentName: z.string(),
   profileName: z.string(),
-  entityIndex: z.number().int().min(0),
-  grade: z.number(),
-});
+  pviStation: z.number().describe("PVI whose incoming/outgoing grade changes; Civil 3D moves the neighbouring PVI to suit."),
+  gradeIn: z.number().optional().describe("Decimal grade into the PVI, e.g. -0.005 for -0.5%."),
+  gradeOut: z.number().optional().describe("Decimal grade out of the PVI."),
+}).refine((v) => v.gradeIn !== undefined || v.gradeOut !== undefined, { message: "gradeIn and/or gradeOut is required." });
 
 const ProfileCheckKValuesArgsSchema = z.object({
   action: z.literal("check_k_values"),
@@ -208,13 +277,21 @@ const ProfileViewCreateArgsSchema = z.object({
   insertX: z.number(),
   insertY: z.number(),
   style: z.string().optional(),
-  bandSet: z.string().optional(),
+  bandSet: z.string().optional().describe("Band set applied at creation (ProfileView.Create with the band set) — the path on which Civil 3D creates the band label groups automatically; profile-data bands then get Profile1 = first surface profile, Profile2 = first layout profile, so author band labels against Profile1/Profile2 accordingly or reassign with view_band_set."),
 });
 
 const ProfileViewBandSetArgsSchema = z.object({
   action: z.literal("view_band_set"),
   profileViewName: z.string(),
   bandSetName: z.string(),
+  bands: z.array(z.object({
+    band: z.string().min(1).optional().describe("Band style name in the set."),
+    index: z.number().int().min(0).optional().describe("Position of the band in the set's bottom (or top) list, 0 = nearest the graph; use when names cannot be matched."),
+    location: z.enum(["bottom", "top"]).optional(),
+    profile1: z.string().optional().describe("Profile shown by the band (Profile1)."),
+    profile2: z.string().optional(),
+  })).optional().describe("Data sources for profile-data bands after the import (they show nothing until Profile1 is set)."),
+  rebuild: z.boolean().optional().describe("Rebuild the view's band items from the set through the view's own band item collection instead of ImportBandSetStyle. Civil 3D creates band label groups (the text inside the bands) only at view creation or through that collection — an import onto an existing view draws boxes and ticks but no text. Pass bands:[{index, band}] so every item can be named."),
 });
 
 // ─── Canonical input shape (union of all action fields) ───────────────────────
@@ -229,7 +306,11 @@ const canonicalProfileInputShape = {
     "create_layout",
     "delete",
     "report",
+    "create_from_file",
+    "copy",
+    "view_create_multiple",
     "add_pvi",
+    "move_pvi",
     "delete_pvi",
     "add_curve",
     "set_grade",
@@ -251,15 +332,37 @@ const canonicalProfileInputShape = {
   layer: z.string().optional(),
   labelSet: z.string().optional(),
   pviStation: z.number().optional(),
+  filePath: z.string().optional(),
+  text: z.string().optional(),
+  stationColumn: z.number().int().nonnegative().optional(),
+  elevationColumn: z.number().int().nonnegative().optional(),
+  skipLines: z.number().int().nonnegative().optional(),
+  newProfileName: z.string().optional(),
+  offset: z.number().optional(),
+  lengthOfEachView: z.number().positive().optional(),
+  maxViewsInRow: z.number().int().positive().optional(),
+  gapBetweenViewsInRow: z.number().nonnegative().optional(),
+  gapBetweenViewsInColumn: z.number().nonnegative().optional(),
   length: z.number().positive().optional(),
-  curveType: z.enum(["symmetric_parabola", "asymmetric_parabola"]).optional(),
-  entityIndex: z.number().int().min(0).optional(),
-  grade: z.number().optional(),
+  k: z.number().positive().optional(),
+  length1: z.number().positive().optional(),
+  length2: z.number().positive().optional(),
+  radius: z.number().positive().optional(),
+  curveLength: z.number().positive().optional(),
+  curveLength1: z.number().positive().optional(),
+  curveLength2: z.number().positive().optional(),
+  newStation: z.number().optional(),
+  newElevation: z.number().optional(),
+  curveType: z.enum(["symmetric_parabola", "asymmetric_parabola", "circular"]).optional(),
+  gradeIn: z.number().optional(),
+  gradeOut: z.number().optional(),
   designSpeed: z.number().positive().optional(),
   insertX: z.number().optional(),
   insertY: z.number().optional(),
   bandSet: z.string().optional(),
   bandSetName: z.string().optional(),
+  bands: z.array(z.object({ band: z.string().optional(), index: z.number().int().optional(), location: z.enum(["bottom", "top"]).optional(), profile1: z.string().optional(), profile2: z.string().optional() })).optional(),
+  rebuild: z.boolean().optional(),
 };
 
 // ─── Report helper ────────────────────────────────────────────────────────────
@@ -344,16 +447,64 @@ export const PROFILE_DOMAIN_DEFINITION: DomainToolDefinition = {
       capabilities: ["create"],
       requiresActiveDrawing: true,
       safeForRetry: false,
-      pluginMethods: ["createProfileFromSurface"],
+      pluginMethods: ["profileCreateFromSurfaceEx"],
       execute: async (args) => await withApplicationConnection(
-        async (appClient) => await appClient.sendCommand("createProfileFromSurface", {
+        async (appClient) => await appClient.sendCommand("profileCreateFromSurfaceEx", {
           alignmentName: args.alignmentName,
           profileName: args.profileName,
           surfaceName: args.surfaceName,
-          style: args.style,
-          layer: args.layer,
-          labelSet: args.labelSet,
+          style: args.style ?? null,
+          layer: args.layer ?? null,
+          labelSet: args.labelSet ?? null,
+          offset: args.offset ?? null,
+          startStation: args.startStation ?? null,
+          endStation: args.endStation ?? null,
         }),
+      ),
+    },
+    create_from_file: {
+      action: "create_from_file",
+      inputSchema: ProfileCreateFromFileArgsSchema,
+      responseSchema: GenericProfileResponseSchema,
+      capabilities: ["create"],
+      requiresActiveDrawing: true,
+      safeForRetry: false,
+      pluginMethods: ["profileCreateFromFile"],
+      execute: async (args) => await withApplicationConnection(
+        async (appClient) => {
+          const { action: _action, ...rest } = args;
+          return await appClient.sendCommand("profileCreateFromFile", rest);
+        },
+      ),
+    },
+    copy: {
+      action: "copy",
+      inputSchema: ProfileCopyArgsSchema,
+      responseSchema: GenericProfileResponseSchema,
+      capabilities: ["create"],
+      requiresActiveDrawing: true,
+      safeForRetry: false,
+      pluginMethods: ["profileCopy"],
+      execute: async (args) => await withApplicationConnection(
+        async (appClient) => {
+          const { action: _action, ...rest } = args;
+          return await appClient.sendCommand("profileCopy", rest);
+        },
+      ),
+    },
+    view_create_multiple: {
+      action: "view_create_multiple",
+      inputSchema: ProfileViewCreateMultipleArgsSchema,
+      responseSchema: GenericProfileResponseSchema,
+      capabilities: ["create"],
+      requiresActiveDrawing: true,
+      safeForRetry: false,
+      pluginMethods: ["profileViewCreateMultiple"],
+      execute: async (args) => await withApplicationConnection(
+        async (appClient) => {
+          const { action: _action, ...rest } = args;
+          return await appClient.sendCommand("profileViewCreateMultiple", rest);
+        },
       ),
     },
     create_layout: {
@@ -480,6 +631,28 @@ export const PROFILE_DOMAIN_DEFINITION: DomainToolDefinition = {
           profileName: args.profileName,
           station: args.station,
           elevation: args.elevation,
+          curveLength: args.curveLength ?? null,
+          curveLength1: args.curveLength1 ?? null,
+          curveLength2: args.curveLength2 ?? null,
+          radius: args.radius ?? null,
+        }),
+      ),
+    },
+    move_pvi: {
+      action: "move_pvi",
+      inputSchema: ProfileMovePviArgsSchema,
+      responseSchema: GenericProfileResponseSchema,
+      capabilities: ["edit"],
+      requiresActiveDrawing: true,
+      safeForRetry: false,
+      pluginMethods: ["profileMovePvi"],
+      execute: async (args) => await withApplicationConnection(
+        async (appClient) => await appClient.sendCommand("profileMovePvi", {
+          alignmentName: args.alignmentName,
+          profileName: args.profileName,
+          station: args.station,
+          newStation: args.newStation ?? null,
+          newElevation: args.newElevation ?? null,
         }),
       ),
     },
@@ -512,8 +685,12 @@ export const PROFILE_DOMAIN_DEFINITION: DomainToolDefinition = {
           alignmentName: args.alignmentName,
           profileName: args.profileName,
           pviStation: args.pviStation,
-          length: args.length,
           curveType: args.curveType,
+          length: args.length ?? null,
+          k: args.k ?? null,
+          length1: args.length1 ?? null,
+          length2: args.length2 ?? null,
+          radius: args.radius ?? null,
         }),
       ),
     },
@@ -529,8 +706,9 @@ export const PROFILE_DOMAIN_DEFINITION: DomainToolDefinition = {
         async (appClient) => await appClient.sendCommand("profileSetGrade", {
           alignmentName: args.alignmentName,
           profileName: args.profileName,
-          entityIndex: args.entityIndex,
-          grade: args.grade,
+          pviStation: args.pviStation,
+          gradeIn: args.gradeIn ?? null,
+          gradeOut: args.gradeOut ?? null,
         }),
       ),
     },
@@ -581,6 +759,8 @@ export const PROFILE_DOMAIN_DEFINITION: DomainToolDefinition = {
         async (appClient) => await appClient.sendCommand("profileViewBandSet", {
           profileViewName: args.profileViewName,
           bandSetName: args.bandSetName,
+          bands: args.bands,
+          rebuild: args.rebuild,
         }),
       ),
     },
@@ -600,7 +780,11 @@ export const PROFILE_DOMAIN_DEFINITION: DomainToolDefinition = {
         "create_layout",
         "delete",
         "report",
+        "create_from_file",
+        "copy",
+        "view_create_multiple",
         "add_pvi",
+        "move_pvi",
         "delete_pvi",
         "add_curve",
         "set_grade",
@@ -689,8 +873,12 @@ export const PROFILE_DOMAIN_DEFINITION: DomainToolDefinition = {
         alignmentName: z.string(),
         profileName: z.string(),
         pviStation: z.number(),
-        length: z.number().positive(),
-        curveType: z.enum(["symmetric_parabola", "asymmetric_parabola"]).optional().default("symmetric_parabola"),
+        length: z.number().positive().optional(),
+        k: z.number().positive().optional(),
+        length1: z.number().positive().optional(),
+        length2: z.number().positive().optional(),
+        radius: z.number().positive().optional(),
+        curveType: z.enum(["symmetric_parabola", "asymmetric_parabola", "circular"]).optional().default("symmetric_parabola"),
       },
       supportedActions: ["add_curve"],
       resolveAction: (rawArgs) => ({
@@ -701,6 +889,10 @@ export const PROFILE_DOMAIN_DEFINITION: DomainToolDefinition = {
           profileName: rawArgs.profileName,
           pviStation: rawArgs.pviStation,
           length: rawArgs.length,
+          k: rawArgs.k,
+          length1: rawArgs.length1,
+          length2: rawArgs.length2,
+          radius: rawArgs.radius,
           curveType: rawArgs.curveType,
         },
       }),
@@ -708,12 +900,13 @@ export const PROFILE_DOMAIN_DEFINITION: DomainToolDefinition = {
     {
       toolName: "civil3d_profile_set_grade",
       displayName: "Civil 3D Profile Set Grade",
-      description: "Sets the grade (slope) of a tangent entity in a Civil 3D layout profile. Grade is expressed as a decimal fraction (0.02 = 2%).",
+      description: "Sets the grade into or out of a PVI in a Civil 3D layout profile (Civil 3D moves the neighbouring PVI to suit). Grade is a decimal fraction (0.02 = 2%).",
       inputShape: {
         alignmentName: z.string(),
         profileName: z.string(),
-        entityIndex: z.number().int().min(0),
-        grade: z.number(),
+        pviStation: z.number(),
+        gradeIn: z.number().optional(),
+        gradeOut: z.number().optional(),
       },
       supportedActions: ["set_grade"],
       resolveAction: (rawArgs) => ({
@@ -722,8 +915,9 @@ export const PROFILE_DOMAIN_DEFINITION: DomainToolDefinition = {
           action: "set_grade",
           alignmentName: rawArgs.alignmentName,
           profileName: rawArgs.profileName,
-          entityIndex: rawArgs.entityIndex,
-          grade: rawArgs.grade,
+          pviStation: rawArgs.pviStation,
+          gradeIn: rawArgs.gradeIn,
+          gradeOut: rawArgs.gradeOut,
         },
       }),
     },

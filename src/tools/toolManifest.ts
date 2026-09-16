@@ -21,6 +21,7 @@ import { SURVEY_DOMAIN_DEFINITION } from "./domains/surveyDomain.js";
 import { PLAN_PRODUCTION_DOMAIN_DEFINITION } from "./domains/planProductionDomain.js";
 import { PROJECT_DOMAIN_DEFINITION } from "./domains/projectDomain.js";
 import { STANDARDS_DOMAIN_DEFINITION } from "./domains/standardsDomain.js";
+import { STYLE_DOMAIN_DEFINITION } from "./domains/styleDomain.js";
 import { QC_DOMAIN_DEFINITION } from "./domains/qcDomain.js";
 import { HYDROLOGY_DOMAIN_DEFINITION } from "./domains/hydrologyDomain.js";
 import { QUANTITY_TAKEOFF_DOMAIN_DEFINITION } from "./domains/quantityTakeoffDomain.js";
@@ -55,6 +56,7 @@ export const MIGRATED_DOMAIN_DEFINITIONS = [
   PLAN_PRODUCTION_DOMAIN_DEFINITION,
   PROJECT_DOMAIN_DEFINITION,
   STANDARDS_DOMAIN_DEFINITION,
+  STYLE_DOMAIN_DEFINITION,
   QC_DOMAIN_DEFINITION,
   HYDROLOGY_DOMAIN_DEFINITION,
   QUANTITY_TAKEOFF_DOMAIN_DEFINITION,

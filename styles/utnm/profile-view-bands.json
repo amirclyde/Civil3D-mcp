@@ -1,0 +1,1488 @@
+{
+  "styles": [
+    {
+      "family": "profile_view",
+      "name": "UTNM-ProfileView",
+      "description": "UTNM long section: exaggeration 5, no axes/box, vertical grid every 25 m clipped to the highest profile, two-line title (H/V scale + datum) left-justified in the title column above the datum line. Title fields valid here: Profile View Minimum Elevation (= datum), Graph View Name, Drawing Scale; Horizontal/Vertical Scale and Datum Elevation are not.",
+      "display": {
+        "plan": {
+          "GraphTitle": {
+            "visible": true,
+            "color": "ByLayer"
+          },
+          "LeftAxis": {
+            "visible": false
+          },
+          "LeftAxisTitle": {
+            "visible": false
+          },
+          "LeftAxisAnnotationMajor": {
+            "visible": false
+          },
+          "LeftAxisAnnotationMinor": {
+            "visible": false
+          },
+          "LeftAxisTicksMajor": {
+            "visible": false
+          },
+          "LeftAxisTicksMinor": {
+            "visible": false
+          },
+          "RightAxis": {
+            "visible": false
+          },
+          "RightAxisTitle": {
+            "visible": false
+          },
+          "RightAxisAnnotationMajor": {
+            "visible": false
+          },
+          "RightAxisAnnotationMinor": {
+            "visible": false
+          },
+          "RightAxisTicksMajor": {
+            "visible": false
+          },
+          "RightAxisTicksMinor": {
+            "visible": false
+          },
+          "TopAxis": {
+            "visible": false
+          },
+          "TopAxisTitle": {
+            "visible": false
+          },
+          "TopAxisAnnotationMajor": {
+            "visible": false
+          },
+          "TopAxisAnnotationMinor": {
+            "visible": false
+          },
+          "TopAxisTicksMajor": {
+            "visible": false
+          },
+          "TopAxisTicksMinor": {
+            "visible": false
+          },
+          "BottomAxis": {
+            "visible": false
+          },
+          "BottomAxisTitle": {
+            "visible": false
+          },
+          "BottomAxisAnnotationMajor": {
+            "visible": false
+          },
+          "BottomAxisAnnotationMinor": {
+            "visible": false
+          },
+          "BottomAxisTicksMajor": {
+            "visible": false
+          },
+          "BottomAxisTicksMinor": {
+            "visible": false
+          },
+          "GridHorizontalMajor": {
+            "visible": false
+          },
+          "GridHorizontalMinor": {
+            "visible": false
+          },
+          "GridVerticalMajor": {
+            "visible": true,
+            "color": 8,
+            "lineweight": 0.13
+          },
+          "GridVerticalMinor": {
+            "visible": false
+          },
+          "GridAtHGP": {
+            "visible": false
+          },
+          "TopAxisAnnotationHGP": {
+            "visible": false
+          },
+          "TopAxisTicksHGP": {
+            "visible": false
+          },
+          "BottomAxisAnnotationHGP": {
+            "visible": false
+          },
+          "BottomAxisTicksHGP": {
+            "visible": false
+          },
+          "GridAtSampleLineStations": {
+            "visible": false
+          }
+        }
+      },
+      "settings": {
+        "graphStyle": {
+          "verticalExaggeration": 5,
+          "direction": "LeftToRight",
+          "titleStyle": {
+            "text": "\\pql;H=1:1000 V=1:200\\PDATUM=<[Profile View Minimum Elevation(Um|P3|RN|Sn|OF|AP|GC|UN)]>m",
+            "location": "Bottom",
+            "justification": "TopOrLeft",
+            "border": false,
+            "borderGap": 0.001,
+            "textHeight": 0.003,
+            "offsetX": -0.078,
+            "offsetY": 0.009
+          }
+        },
+        "gridStyle": {
+          "gridPaddingAbove": 0,
+          "gridPaddingBottom": 0,
+          "gridPaddingLeft": 0,
+          "gridPaddingRight": 0,
+          "axisOffsetAbove": 0,
+          "axisOffsetBottom": 0,
+          "axisOffsetLeft": 0,
+          "axisOffsetRight": 0,
+          "verticalGridOptions": {
+            "clipToHighestProfile": true,
+            "useClipGrid": true,
+            "omitGridInPaddingAreas": false
+          },
+          "horizontalGridOptions": {
+            "clipToHighestProfile": false,
+            "useClipGrid": false,
+            "omitGridInPaddingAreas": false
+          }
+        },
+        "bottomAxis": {
+          "showTickAndLabel": false,
+          "majorTickStyle": {
+            "interval": 25
+          },
+          "minorTickStyle": {
+            "interval": 5
+          }
+        },
+        "topAxis": {
+          "majorTickStyle": {
+            "interval": 25
+          },
+          "minorTickStyle": {
+            "interval": 5
+          }
+        },
+        "leftAxis": {
+          "showTickAndLabel": false,
+          "majorTickStyle": {
+            "interval": 1
+          },
+          "minorTickStyle": {
+            "interval": 0.5
+          }
+        },
+        "rightAxis": {
+          "showTickAndLabel": false,
+          "majorTickStyle": {
+            "interval": 1
+          },
+          "minorTickStyle": {
+            "interval": 0.5
+          }
+        }
+      }
+    },
+    {
+      "family": "band:profile_data",
+      "name": "UTNM Finished Road Level",
+      "description": "UTNM long section band: FINISHED ROAD LEVEL (m)",
+      "properties": {
+        "bandHeight": 15,
+        "textBoxWidth": 80,
+        "textHeight": 4,
+        "textLocation": "Left",
+        "textBoxPosition": "LeftOfBand",
+        "offsetFromBand": 0,
+        "weedingFactor": 0,
+        "text": "FINISHED ROAD LEVEL (m)"
+      },
+      "display": {
+        "plan": {
+          "Border": {
+            "visible": true,
+            "color": "ByLayer"
+          },
+          "TitleBox": {
+            "visible": true,
+            "color": "ByLayer"
+          },
+          "TitleBoxText": {
+            "visible": true,
+            "color": "ByLayer"
+          },
+          "MajorTicks": {
+            "visible": true,
+            "color": "ByLayer"
+          },
+          "MinorTicks": {
+            "visible": false
+          },
+          "TicksAtVGP": {
+            "visible": false
+          },
+          "TicksAtHGP": {
+            "visible": false
+          },
+          "TicksAtStationEquations": {
+            "visible": false
+          },
+          "MajorStationLabel": {
+            "visible": true,
+            "color": 1
+          },
+          "MinorStationLabel": {
+            "visible": false
+          },
+          "LabelsAtVGP": {
+            "visible": false
+          },
+          "LabelsAtHGP": {
+            "visible": false
+          },
+          "LabelsAtStationEquations": {
+            "visible": false
+          },
+          "LabelsAtIncrementalDistance": {
+            "visible": false
+          }
+        }
+      },
+      "settings": {
+        "majorIncrementTickStyle": {
+          "incrementSmallTicksAtTop": true,
+          "smallTicksAtTopSize": 1,
+          "incrementSmallTicksAtMiddle": false,
+          "incrementSmallTicksAtBottom": false,
+          "incrementTicksToFullHeight": false
+        },
+        "minorIncrementTickStyle": {
+          "incrementSmallTicksAtTop": false,
+          "incrementSmallTicksAtMiddle": false,
+          "incrementSmallTicksAtBottom": false,
+          "incrementTicksToFullHeight": false
+        },
+        "hgpTickStyle": {
+          "incrementSmallTicksAtTop": false,
+          "incrementSmallTicksAtMiddle": false,
+          "incrementSmallTicksAtBottom": false,
+          "incrementTicksToFullHeight": false
+        },
+        "vgpTickStyle": {
+          "incrementSmallTicksAtTop": false,
+          "incrementSmallTicksAtMiddle": false,
+          "incrementSmallTicksAtBottom": false,
+          "incrementTicksToFullHeight": false
+        }
+      },
+      "labels": {
+        "titleText": {
+          "properties": {
+            "label": {
+              "layer": "0"
+            },
+            "behavior": {
+              "orientationReference": "Object"
+            },
+            "planReadability": {
+              "planReadable": false
+            }
+          },
+          "replaceComponents": true,
+          "components": [
+            {
+              "name": "Text",
+              "type": "Text",
+              "general": {
+                "anchorLocation": "MiddleLeft"
+              },
+              "text": {
+                "contents": "FINISHED ROAD LEVEL (m)",
+                "height": 4,
+                "attachment": "MiddleLeft",
+                "angle": 0,
+                "xOffset": 1,
+                "yOffset": 0
+              },
+              "border": {
+                "visible": false
+              }
+            }
+          ]
+        },
+        "majorIncrement": {
+          "properties": {
+            "label": {
+              "layer": "0"
+            },
+            "behavior": {
+              "orientationReference": "Object"
+            },
+            "planReadability": {
+              "planReadable": false
+            }
+          },
+          "replaceComponents": true,
+          "components": [
+            {
+              "name": "Value",
+              "type": "Text",
+              "general": {
+                "anchorLocation": "BandBottom"
+              },
+              "text": {
+                "contents": "<[Profile1 Elevation(Um|P3|RN|AP|Sn|OF)]>",
+                "height": 2.5,
+                "attachment": "MiddleLeft",
+                "angle": 90,
+                "xOffset": 0,
+                "yOffset": 1,
+                "color": 1
+              },
+              "border": {
+                "visible": false
+              }
+            }
+          ]
+        },
+        "minorIncrement": {
+          "properties": {
+            "label": {
+              "layer": "0"
+            },
+            "behavior": {
+              "orientationReference": "Object"
+            },
+            "planReadability": {
+              "planReadable": false
+            }
+          },
+          "replaceComponents": true,
+          "components": []
+        }
+      }
+    },
+    {
+      "family": "band:profile_data",
+      "name": "UTNM Existing Ground Level",
+      "description": "UTNM long section band: EXISTING GROUND LEVEL (m)",
+      "properties": {
+        "bandHeight": 15,
+        "textBoxWidth": 80,
+        "textHeight": 4,
+        "textLocation": "Left",
+        "textBoxPosition": "LeftOfBand",
+        "offsetFromBand": 0,
+        "weedingFactor": 0,
+        "text": "EXISTING GROUND LEVEL (m)"
+      },
+      "display": {
+        "plan": {
+          "Border": {
+            "visible": true,
+            "color": "ByLayer"
+          },
+          "TitleBox": {
+            "visible": true,
+            "color": "ByLayer"
+          },
+          "TitleBoxText": {
+            "visible": true,
+            "color": "ByLayer"
+          },
+          "MajorTicks": {
+            "visible": true,
+            "color": "ByLayer"
+          },
+          "MinorTicks": {
+            "visible": false
+          },
+          "TicksAtVGP": {
+            "visible": false
+          },
+          "TicksAtHGP": {
+            "visible": false
+          },
+          "TicksAtStationEquations": {
+            "visible": false
+          },
+          "MajorStationLabel": {
+            "visible": true,
+            "color": 3
+          },
+          "MinorStationLabel": {
+            "visible": false
+          },
+          "LabelsAtVGP": {
+            "visible": false
+          },
+          "LabelsAtHGP": {
+            "visible": false
+          },
+          "LabelsAtStationEquations": {
+            "visible": false
+          },
+          "LabelsAtIncrementalDistance": {
+            "visible": false
+          }
+        }
+      },
+      "settings": {
+        "majorIncrementTickStyle": {
+          "incrementSmallTicksAtTop": true,
+          "smallTicksAtTopSize": 1,
+          "incrementSmallTicksAtMiddle": false,
+          "incrementSmallTicksAtBottom": false,
+          "incrementTicksToFullHeight": false
+        },
+        "minorIncrementTickStyle": {
+          "incrementSmallTicksAtTop": false,
+          "incrementSmallTicksAtMiddle": false,
+          "incrementSmallTicksAtBottom": false,
+          "incrementTicksToFullHeight": false
+        },
+        "hgpTickStyle": {
+          "incrementSmallTicksAtTop": false,
+          "incrementSmallTicksAtMiddle": false,
+          "incrementSmallTicksAtBottom": false,
+          "incrementTicksToFullHeight": false
+        },
+        "vgpTickStyle": {
+          "incrementSmallTicksAtTop": false,
+          "incrementSmallTicksAtMiddle": false,
+          "incrementSmallTicksAtBottom": false,
+          "incrementTicksToFullHeight": false
+        }
+      },
+      "labels": {
+        "titleText": {
+          "properties": {
+            "label": {
+              "layer": "0"
+            },
+            "behavior": {
+              "orientationReference": "Object"
+            },
+            "planReadability": {
+              "planReadable": false
+            }
+          },
+          "replaceComponents": true,
+          "components": [
+            {
+              "name": "Text",
+              "type": "Text",
+              "general": {
+                "anchorLocation": "MiddleLeft"
+              },
+              "text": {
+                "contents": "EXISTING GROUND LEVEL (m)",
+                "height": 4,
+                "attachment": "MiddleLeft",
+                "angle": 0,
+                "xOffset": 1,
+                "yOffset": 0
+              },
+              "border": {
+                "visible": false
+              }
+            }
+          ]
+        },
+        "majorIncrement": {
+          "properties": {
+            "label": {
+              "layer": "0"
+            },
+            "behavior": {
+              "orientationReference": "Object"
+            },
+            "planReadability": {
+              "planReadable": false
+            }
+          },
+          "replaceComponents": true,
+          "components": [
+            {
+              "name": "Value",
+              "type": "Text",
+              "general": {
+                "anchorLocation": "BandBottom"
+              },
+              "text": {
+                "contents": "<[Profile1 Elevation(Um|P3|RN|AP|Sn|OF)]>",
+                "height": 2.5,
+                "attachment": "MiddleLeft",
+                "angle": 90,
+                "xOffset": 0,
+                "yOffset": 1,
+                "color": 3
+              },
+              "border": {
+                "visible": false
+              }
+            }
+          ]
+        },
+        "minorIncrement": {
+          "properties": {
+            "label": {
+              "layer": "0"
+            },
+            "behavior": {
+              "orientationReference": "Object"
+            },
+            "planReadability": {
+              "planReadable": false
+            }
+          },
+          "replaceComponents": true,
+          "components": []
+        }
+      }
+    },
+    {
+      "family": "band:profile_data",
+      "name": "UTNM Chainage",
+      "description": "UTNM long section band: CHAINAGE (m) (<profile view name>) — name the profile view after the alignment/model (e.g. MC30); Alignment Name is not a valid field in band titles",
+      "properties": {
+        "bandHeight": 15,
+        "textBoxWidth": 80,
+        "textHeight": 4,
+        "textLocation": "Left",
+        "textBoxPosition": "LeftOfBand",
+        "offsetFromBand": 0,
+        "weedingFactor": 0,
+        "text": "CHAINAGE (m) (<[Alignment Name(CP)]>)"
+      },
+      "display": {
+        "plan": {
+          "Border": {
+            "visible": true,
+            "color": "ByLayer"
+          },
+          "TitleBox": {
+            "visible": true,
+            "color": "ByLayer"
+          },
+          "TitleBoxText": {
+            "visible": true,
+            "color": "ByLayer"
+          },
+          "MajorTicks": {
+            "visible": true,
+            "color": "ByLayer"
+          },
+          "MinorTicks": {
+            "visible": false
+          },
+          "TicksAtVGP": {
+            "visible": false
+          },
+          "TicksAtHGP": {
+            "visible": false
+          },
+          "TicksAtStationEquations": {
+            "visible": false
+          },
+          "MajorStationLabel": {
+            "visible": true,
+            "color": 1
+          },
+          "MinorStationLabel": {
+            "visible": false
+          },
+          "LabelsAtVGP": {
+            "visible": false
+          },
+          "LabelsAtHGP": {
+            "visible": false
+          },
+          "LabelsAtStationEquations": {
+            "visible": false
+          },
+          "LabelsAtIncrementalDistance": {
+            "visible": false
+          }
+        }
+      },
+      "settings": {
+        "majorIncrementTickStyle": {
+          "incrementSmallTicksAtTop": true,
+          "smallTicksAtTopSize": 1,
+          "incrementSmallTicksAtMiddle": false,
+          "incrementSmallTicksAtBottom": false,
+          "incrementTicksToFullHeight": false
+        },
+        "minorIncrementTickStyle": {
+          "incrementSmallTicksAtTop": false,
+          "incrementSmallTicksAtMiddle": false,
+          "incrementSmallTicksAtBottom": false,
+          "incrementTicksToFullHeight": false
+        },
+        "hgpTickStyle": {
+          "incrementSmallTicksAtTop": false,
+          "incrementSmallTicksAtMiddle": false,
+          "incrementSmallTicksAtBottom": false,
+          "incrementTicksToFullHeight": false
+        },
+        "vgpTickStyle": {
+          "incrementSmallTicksAtTop": false,
+          "incrementSmallTicksAtMiddle": false,
+          "incrementSmallTicksAtBottom": false,
+          "incrementTicksToFullHeight": false
+        }
+      },
+      "labels": {
+        "titleText": {
+          "properties": {
+            "label": {
+              "layer": "0"
+            },
+            "behavior": {
+              "orientationReference": "Object"
+            },
+            "planReadability": {
+              "planReadable": false
+            }
+          },
+          "replaceComponents": true,
+          "components": [
+            {
+              "name": "Text",
+              "type": "Text",
+              "general": {
+                "anchorLocation": "MiddleLeft"
+              },
+              "text": {
+                "contents": "CHAINAGE (m) (<[Graph View Name]>)",
+                "height": 4,
+                "attachment": "MiddleLeft",
+                "angle": 0,
+                "xOffset": 1,
+                "yOffset": 0
+              },
+              "border": {
+                "visible": false
+              }
+            }
+          ]
+        },
+        "majorIncrement": {
+          "properties": {
+            "label": {
+              "layer": "0"
+            },
+            "behavior": {
+              "orientationReference": "Object"
+            },
+            "planReadability": {
+              "planReadable": false
+            }
+          },
+          "replaceComponents": true,
+          "components": [
+            {
+              "name": "Value",
+              "type": "Text",
+              "general": {
+                "anchorLocation": "BandBottom"
+              },
+              "text": {
+                "contents": "<[Station Value(Um|FD|P3|RN|AP|Sn|TP|B2|EN|W0|OF)]>",
+                "height": 2.5,
+                "attachment": "MiddleLeft",
+                "angle": 90,
+                "xOffset": 0,
+                "yOffset": 1,
+                "color": 1
+              },
+              "border": {
+                "visible": false
+              }
+            }
+          ]
+        },
+        "minorIncrement": {
+          "properties": {
+            "label": {
+              "layer": "0"
+            },
+            "behavior": {
+              "orientationReference": "Object"
+            },
+            "planReadability": {
+              "planReadable": false
+            }
+          },
+          "replaceComponents": true,
+          "components": []
+        }
+      }
+    },
+    {
+      "family": "band:profile_data",
+      "name": "UTNM Empty Band",
+      "description": "UTNM long section band: ",
+      "properties": {
+        "bandHeight": 20.75,
+        "textBoxWidth": 80,
+        "textHeight": 4,
+        "textLocation": "Left",
+        "textBoxPosition": "LeftOfBand",
+        "offsetFromBand": 0,
+        "weedingFactor": 0,
+        "text": "EMPTY"
+      },
+      "display": {
+        "plan": {
+          "Border": {
+            "visible": true,
+            "color": "ByLayer"
+          },
+          "TitleBox": {
+            "visible": true,
+            "color": "ByLayer"
+          },
+          "TitleBoxText": {
+            "visible": false,
+            "color": "ByLayer"
+          },
+          "MajorTicks": {
+            "visible": false,
+            "color": "ByLayer"
+          },
+          "MinorTicks": {
+            "visible": false
+          },
+          "TicksAtVGP": {
+            "visible": false
+          },
+          "TicksAtHGP": {
+            "visible": false
+          },
+          "TicksAtStationEquations": {
+            "visible": false
+          },
+          "MajorStationLabel": {
+            "visible": false,
+            "color": 1
+          },
+          "MinorStationLabel": {
+            "visible": false
+          },
+          "LabelsAtVGP": {
+            "visible": false
+          },
+          "LabelsAtHGP": {
+            "visible": false
+          },
+          "LabelsAtStationEquations": {
+            "visible": false
+          },
+          "LabelsAtIncrementalDistance": {
+            "visible": false
+          }
+        }
+      },
+      "settings": {
+        "majorIncrementTickStyle": {
+          "incrementSmallTicksAtTop": false,
+          "incrementSmallTicksAtMiddle": false,
+          "incrementSmallTicksAtBottom": false,
+          "incrementTicksToFullHeight": false
+        },
+        "minorIncrementTickStyle": {
+          "incrementSmallTicksAtTop": false,
+          "incrementSmallTicksAtMiddle": false,
+          "incrementSmallTicksAtBottom": false,
+          "incrementTicksToFullHeight": false
+        },
+        "hgpTickStyle": {
+          "incrementSmallTicksAtTop": false,
+          "incrementSmallTicksAtMiddle": false,
+          "incrementSmallTicksAtBottom": false,
+          "incrementTicksToFullHeight": false
+        },
+        "vgpTickStyle": {
+          "incrementSmallTicksAtTop": false,
+          "incrementSmallTicksAtMiddle": false,
+          "incrementSmallTicksAtBottom": false,
+          "incrementTicksToFullHeight": false
+        }
+      },
+      "labels": {}
+    },
+    {
+      "family": "band:horizontal_geometry",
+      "name": "UTNM Horizontal Schematic",
+      "description": "UTNM long section band: HORIZONTAL SCHEMATIC — tangents D=<Length>, curves R=/L=, spirals CL=, geometry-point separators with the End Station rotated 90° at the band bottom (fields valid in horizontal-geometry band labels: Length, Radius, Start Station, End Station; not Start Station Value / Station Value)",
+      "properties": {
+        "bandHeight": 21.25,
+        "textBoxWidth": 80,
+        "textHeight": 4,
+        "textLocation": "Left",
+        "textBoxPosition": "LeftOfBand",
+        "offsetFromBand": 0,
+        "weedingFactor": 0,
+        "text": "HORIZONTAL SCHEMATIC",
+        "schematicLineType": "Geometry"
+      },
+      "display": {
+        "plan": {
+          "Border": {
+            "visible": true,
+            "color": "ByLayer"
+          },
+          "TitleBox": {
+            "visible": true,
+            "color": "ByLayer"
+          },
+          "TitleBoxText": {
+            "visible": true,
+            "color": "ByLayer"
+          },
+          "Ticks": {
+            "visible": true,
+            "color": "ByLayer"
+          },
+          "TangentLabels": {
+            "visible": true,
+            "color": "ByLayer"
+          },
+          "CurveLabels": {
+            "visible": true,
+            "color": "ByLayer"
+          },
+          "SpiralLabels": {
+            "visible": true,
+            "color": "ByLayer"
+          },
+          "TangentGeometry": {
+            "visible": true,
+            "color": "ByLayer"
+          },
+          "CurveGeometry": {
+            "visible": true,
+            "color": "ByLayer"
+          },
+          "SpiralGeometry": {
+            "visible": true,
+            "color": "ByLayer"
+          },
+          "TicksAtPI": {
+            "visible": false
+          },
+          "PILabels": {
+            "visible": false
+          }
+        }
+      },
+      "settings": {
+        "tangentTickStyle": {
+          "incrementSmallTicksAtTop": true,
+          "smallTicksAtTopSize": 1,
+          "incrementSmallTicksAtMiddle": false,
+          "incrementSmallTicksAtBottom": false,
+          "incrementTicksToFullHeight": true
+        },
+        "curveTickStyle": {
+          "incrementSmallTicksAtTop": true,
+          "smallTicksAtTopSize": 1,
+          "incrementSmallTicksAtMiddle": false,
+          "incrementSmallTicksAtBottom": false,
+          "incrementTicksToFullHeight": true
+        },
+        "spiralTickStyle": {
+          "incrementSmallTicksAtTop": true,
+          "smallTicksAtTopSize": 1,
+          "incrementSmallTicksAtMiddle": false,
+          "incrementSmallTicksAtBottom": false,
+          "incrementTicksToFullHeight": true
+        },
+        "pointOfIntersectionTickStyle": {
+          "incrementSmallTicksAtTop": false,
+          "incrementSmallTicksAtMiddle": false,
+          "incrementSmallTicksAtBottom": false,
+          "incrementTicksToFullHeight": false
+        }
+      },
+      "labels": {
+        "titleText": {
+          "properties": {
+            "label": {
+              "layer": "0"
+            },
+            "behavior": {
+              "orientationReference": "Object"
+            },
+            "planReadability": {
+              "planReadable": false
+            }
+          },
+          "replaceComponents": true,
+          "components": [
+            {
+              "name": "Text",
+              "type": "Text",
+              "general": {
+                "anchorLocation": "MiddleLeft"
+              },
+              "text": {
+                "contents": "HORIZONTAL SCHEMATIC",
+                "height": 4,
+                "attachment": "MiddleLeft",
+                "angle": 0,
+                "xOffset": 1,
+                "yOffset": 0
+              },
+              "border": {
+                "visible": false
+              }
+            }
+          ]
+        },
+        "tangent": {
+          "properties": {
+            "label": {
+              "layer": "0"
+            },
+            "behavior": {
+              "orientationReference": "Object"
+            },
+            "planReadability": {
+              "planReadable": false
+            }
+          },
+          "replaceComponents": true,
+          "components": [
+            {
+              "name": "Length",
+              "type": "Text",
+              "general": {
+                "anchorLocation": "SchematicLineMid"
+              },
+              "text": {
+                "contents": "D=<[Length(Um|P3|RN|AP|Sn|OF)]>",
+                "height": 2.5,
+                "attachment": "BottomCenter",
+                "angle": 0,
+                "xOffset": 0,
+                "yOffset": 0.75
+              },
+              "border": {
+                "visible": false
+              }
+            },
+            {
+              "name": "End Station",
+              "type": "Text",
+              "general": {
+                "anchorLocation": "SegmentEndAndBandBot"
+              },
+              "text": {
+                "contents": "<[End Station(Um|P3|RN|AP|Sn|OF)]>",
+                "height": 2.5,
+                "attachment": "BottomLeft",
+                "angle": 90,
+                "xOffset": -0.75,
+                "yOffset": 1
+              },
+              "border": {
+                "visible": false
+              }
+            }
+          ]
+        },
+        "curve": {
+          "properties": {
+            "label": {
+              "layer": "0"
+            },
+            "behavior": {
+              "orientationReference": "Object"
+            },
+            "planReadability": {
+              "planReadable": false
+            }
+          },
+          "replaceComponents": true,
+          "components": [
+            {
+              "name": "Radius",
+              "type": "Text",
+              "general": {
+                "anchorLocation": "SchematicLineMid"
+              },
+              "text": {
+                "contents": "R=<[Radius(Um|P3|RN|AP|Sn|OF)]>",
+                "height": 2.5,
+                "attachment": "BottomCenter",
+                "angle": 0,
+                "xOffset": 0,
+                "yOffset": 0.75
+              },
+              "border": {
+                "visible": false
+              }
+            },
+            {
+              "name": "Length",
+              "type": "Text",
+              "general": {
+                "anchorLocation": "SchematicLineMid"
+              },
+              "text": {
+                "contents": "L=<[Length(Um|P3|RN|AP|Sn|OF)]>",
+                "height": 2.5,
+                "attachment": "TopCenter",
+                "angle": 0,
+                "xOffset": 0,
+                "yOffset": -0.75
+              },
+              "border": {
+                "visible": false
+              }
+            },
+            {
+              "name": "End Station",
+              "type": "Text",
+              "general": {
+                "anchorLocation": "SegmentEndAndBandBot"
+              },
+              "text": {
+                "contents": "<[End Station(Um|P3|RN|AP|Sn|OF)]>",
+                "height": 2.5,
+                "attachment": "BottomLeft",
+                "angle": 90,
+                "xOffset": -0.75,
+                "yOffset": 1
+              },
+              "border": {
+                "visible": false
+              }
+            }
+          ]
+        },
+        "spiral": {
+          "properties": {
+            "label": {
+              "layer": "0"
+            },
+            "behavior": {
+              "orientationReference": "Object"
+            },
+            "planReadability": {
+              "planReadable": false
+            }
+          },
+          "replaceComponents": true,
+          "components": [
+            {
+              "name": "Length",
+              "type": "Text",
+              "general": {
+                "anchorLocation": "SchematicLineMid"
+              },
+              "text": {
+                "contents": "CL=<[Length(Um|P3|RN|AP|Sn|OF)]>",
+                "height": 2.5,
+                "attachment": "BottomCenter",
+                "angle": 0,
+                "xOffset": 0,
+                "yOffset": 0.75
+              },
+              "border": {
+                "visible": false
+              }
+            },
+            {
+              "name": "End Station",
+              "type": "Text",
+              "general": {
+                "anchorLocation": "SegmentEndAndBandBot"
+              },
+              "text": {
+                "contents": "<[End Station(Um|P3|RN|AP|Sn|OF)]>",
+                "height": 2.5,
+                "attachment": "BottomLeft",
+                "angle": 90,
+                "xOffset": -0.75,
+                "yOffset": 1
+              },
+              "border": {
+                "visible": false
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "family": "band:vertical_geometry",
+      "name": "UTNM Vertical Schematic",
+      "description": "UTNM long section band: VERTICAL SCHEMATIC — tangents P= (grade) / L=, curves R= L=, PVC/PVT separators",
+      "properties": {
+        "bandHeight": 20.75,
+        "textBoxWidth": 80,
+        "textHeight": 4,
+        "textLocation": "Left",
+        "textBoxPosition": "LeftOfBand",
+        "offsetFromBand": 0,
+        "weedingFactor": 0,
+        "text": "VERTICAL SCHEMATIC",
+        "labelOnlyTangents": false
+      },
+      "display": {
+        "plan": {
+          "Border": {
+            "visible": true,
+            "color": "ByLayer"
+          },
+          "TitleBox": {
+            "visible": true,
+            "color": "ByLayer"
+          },
+          "TitleBoxText": {
+            "visible": true,
+            "color": "ByLayer"
+          },
+          "Ticks": {
+            "visible": true,
+            "color": "ByLayer"
+          },
+          "TangentLabels": {
+            "visible": true,
+            "color": "ByLayer"
+          },
+          "CurveLabels": {
+            "visible": true,
+            "color": "ByLayer"
+          },
+          "TangentGeometry": {
+            "visible": true,
+            "color": "ByLayer"
+          },
+          "CurveGeometry": {
+            "visible": true,
+            "color": "ByLayer"
+          }
+        }
+      },
+      "settings": {
+        "uphillTangentTickStyle": {
+          "incrementSmallTicksAtTop": true,
+          "smallTicksAtTopSize": 1,
+          "incrementSmallTicksAtMiddle": false,
+          "incrementSmallTicksAtBottom": false,
+          "incrementTicksToFullHeight": true
+        },
+        "downhillTangentTickStyle": {
+          "incrementSmallTicksAtTop": true,
+          "smallTicksAtTopSize": 1,
+          "incrementSmallTicksAtMiddle": false,
+          "incrementSmallTicksAtBottom": false,
+          "incrementTicksToFullHeight": true
+        },
+        "crestCurveTickStyle": {
+          "incrementSmallTicksAtTop": true,
+          "smallTicksAtTopSize": 1,
+          "incrementSmallTicksAtMiddle": false,
+          "incrementSmallTicksAtBottom": false,
+          "incrementTicksToFullHeight": true
+        },
+        "sagCurveTickStyle": {
+          "incrementSmallTicksAtTop": true,
+          "smallTicksAtTopSize": 1,
+          "incrementSmallTicksAtMiddle": false,
+          "incrementSmallTicksAtBottom": false,
+          "incrementTicksToFullHeight": true
+        }
+      },
+      "labels": {
+        "titleText": {
+          "properties": {
+            "label": {
+              "layer": "0"
+            },
+            "behavior": {
+              "orientationReference": "Object"
+            },
+            "planReadability": {
+              "planReadable": false
+            }
+          },
+          "replaceComponents": true,
+          "components": [
+            {
+              "name": "Text",
+              "type": "Text",
+              "general": {
+                "anchorLocation": "MiddleLeft"
+              },
+              "text": {
+                "contents": "VERTICAL SCHEMATIC",
+                "height": 4,
+                "attachment": "MiddleLeft",
+                "angle": 0,
+                "xOffset": 1,
+                "yOffset": 0
+              },
+              "border": {
+                "visible": false
+              }
+            }
+          ]
+        },
+        "uphillTangent": {
+          "properties": {
+            "label": {
+              "layer": "0"
+            },
+            "behavior": {
+              "orientationReference": "Object"
+            },
+            "planReadability": {
+              "planReadable": false
+            }
+          },
+          "replaceComponents": true,
+          "components": [
+            {
+              "name": "Grade",
+              "type": "Text",
+              "general": {
+                "anchorLocation": "SegmentMiddleAndBandMiddle"
+              },
+              "text": {
+                "contents": "P=<[Tangent Grade(FP|P3|RN|AP|Sn|OF)]>",
+                "height": 2.5,
+                "attachment": "BottomCenter",
+                "angle": 0,
+                "xOffset": 0,
+                "yOffset": 0.75
+              },
+              "border": {
+                "visible": false
+              }
+            },
+            {
+              "name": "Length",
+              "type": "Text",
+              "general": {
+                "anchorLocation": "SegmentMiddleAndBandMiddle"
+              },
+              "text": {
+                "contents": "L=<[Tangent Horizontal Length(Um|P3|RN|AP|Sn|OF)]>",
+                "height": 2.5,
+                "attachment": "TopCenter",
+                "angle": 0,
+                "xOffset": 0,
+                "yOffset": -0.75
+              },
+              "border": {
+                "visible": false
+              }
+            }
+          ]
+        },
+        "downhillTangent": {
+          "properties": {
+            "label": {
+              "layer": "0"
+            },
+            "behavior": {
+              "orientationReference": "Object"
+            },
+            "planReadability": {
+              "planReadable": false
+            }
+          },
+          "replaceComponents": true,
+          "components": [
+            {
+              "name": "Grade",
+              "type": "Text",
+              "general": {
+                "anchorLocation": "SegmentMiddleAndBandMiddle"
+              },
+              "text": {
+                "contents": "P=<[Tangent Grade(FP|P3|RN|AP|Sn|OF)]>",
+                "height": 2.5,
+                "attachment": "BottomCenter",
+                "angle": 0,
+                "xOffset": 0,
+                "yOffset": 0.75
+              },
+              "border": {
+                "visible": false
+              }
+            },
+            {
+              "name": "Length",
+              "type": "Text",
+              "general": {
+                "anchorLocation": "SegmentMiddleAndBandMiddle"
+              },
+              "text": {
+                "contents": "L=<[Tangent Horizontal Length(Um|P3|RN|AP|Sn|OF)]>",
+                "height": 2.5,
+                "attachment": "TopCenter",
+                "angle": 0,
+                "xOffset": 0,
+                "yOffset": -0.75
+              },
+              "border": {
+                "visible": false
+              }
+            }
+          ]
+        },
+        "crestCurve": {
+          "properties": {
+            "label": {
+              "layer": "0"
+            },
+            "behavior": {
+              "orientationReference": "Object"
+            },
+            "planReadability": {
+              "planReadable": false
+            }
+          },
+          "replaceComponents": true,
+          "components": [
+            {
+              "name": "Curve",
+              "type": "Text",
+              "general": {
+                "anchorLocation": "SegmentMiddleAndBandMiddle"
+              },
+              "text": {
+                "contents": "R=<[Profile Curve Radius(Um|P3|RN|AP|Sn|OF)]> L=<[Profile Curve Length(Um|P3|RN|AP|Sn|OF)]>",
+                "height": 2.5,
+                "attachment": "BottomCenter",
+                "angle": 0,
+                "xOffset": 0,
+                "yOffset": 0.75
+              },
+              "border": {
+                "visible": false
+              }
+            }
+          ]
+        },
+        "sagCurve": {
+          "properties": {
+            "label": {
+              "layer": "0"
+            },
+            "behavior": {
+              "orientationReference": "Object"
+            },
+            "planReadability": {
+              "planReadable": false
+            }
+          },
+          "replaceComponents": true,
+          "components": [
+            {
+              "name": "Curve",
+              "type": "Text",
+              "general": {
+                "anchorLocation": "SegmentMiddleAndBandMiddle"
+              },
+              "text": {
+                "contents": "R=<[Profile Curve Radius(Um|P3|RN|AP|Sn|OF)]> L=<[Profile Curve Length(Um|P3|RN|AP|Sn|OF)]>",
+                "height": 2.5,
+                "attachment": "TopCenter",
+                "angle": 0,
+                "xOffset": 0,
+                "yOffset": -0.75
+              },
+              "border": {
+                "visible": false
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "family": "profile_view_band_set",
+      "name": "UTNM-ProfileBands",
+      "description": "UTNM long section band stack (bottom of view, graph downwards): FRL, EGL, 15 mm gap, CHAINAGE, HORIZONTAL SCHEMATIC, VERTICAL SCHEMATIC, empty band; 25 m intervals, start/end stations labelled. matchIncrementToGridIntervals must be false (the view style hides the axis ticks); apply at view creation (view_create bandSet) or with view_band_set rebuild:true — Civil 3D creates the band label groups only on those paths",
+      "replaceItems": true,
+      "items": [
+        {
+          "band": "UTNM Finished Road Level",
+          "location": "bottom",
+          "gap": 0,
+          "majorInterval": 25,
+          "minorInterval": 5,
+          "showLabels": true,
+          "weeding": 100,
+          "labelAtStartStation": true,
+          "labelAtEndStation": true
+        },
+        {
+          "band": "UTNM Existing Ground Level",
+          "location": "bottom",
+          "gap": 0,
+          "majorInterval": 25,
+          "minorInterval": 5,
+          "showLabels": true,
+          "weeding": 100,
+          "labelAtStartStation": true,
+          "labelAtEndStation": true
+        },
+        {
+          "band": "UTNM Chainage",
+          "location": "bottom",
+          "gap": 15,
+          "majorInterval": 25,
+          "minorInterval": 5,
+          "showLabels": true,
+          "weeding": 100,
+          "labelAtStartStation": true,
+          "labelAtEndStation": true
+        },
+        {
+          "band": "UTNM Horizontal Schematic",
+          "location": "bottom",
+          "gap": 0,
+          "majorInterval": 25,
+          "minorInterval": 5,
+          "showLabels": true,
+          "weeding": 100
+        },
+        {
+          "band": "UTNM Vertical Schematic",
+          "location": "bottom",
+          "gap": 0,
+          "majorInterval": 25,
+          "minorInterval": 5,
+          "showLabels": true,
+          "weeding": 100
+        },
+        {
+          "band": "UTNM Empty Band",
+          "location": "bottom",
+          "gap": 0,
+          "majorInterval": 25,
+          "minorInterval": 5,
+          "showLabels": false,
+          "weeding": 100
+        }
+      ],
+      "properties": {
+        "matchIncrementToGridIntervals": false
+      }
+    }
+  ]
+}

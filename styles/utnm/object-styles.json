@@ -1,0 +1,293 @@
+{
+  "$comment": "UTNM object-style library, phase 1 (15 Sep 2026). Apply with civil3d_style library_apply {path: 'C:/Dev/Civil3D-mcp/styles/utnm/object-styles.json'} (upsert; ifExists defaults to update). Order matters: markers before the styles that reference them.",
+  "styles": [
+    {
+      "family": "marker",
+      "name": "UTNM PI",
+      "description": "UTNM alignment PI marker",
+      "display": {
+        "plan": {
+          "Marker": {
+            "visible": true,
+            "color": 2,
+            "layer": "C-ROAD-STAN-UTNM",
+            "layerColor": 2
+          }
+        },
+        "model": {
+          "Marker": {
+            "visible": false
+          }
+        }
+      },
+      "properties": {
+        "markerType": "UseCustomMarker",
+        "customMarkerStyle": "CustomMarkerX",
+        "customMarkerSuperimposeStyle": "Circle",
+        "sizeType": "AbsoluteUnits",
+        "markerSize": 2,
+        "orientation": "OrientToWCS"
+      }
+    },
+    {
+      "family": "surface",
+      "name": "UTNM Contours 0.5m and 2.5m",
+      "description": "UTNM design surface - 0.5 m minor / 2.5 m major contours, border on",
+      "display": {
+        "plan": {
+          "MajorContour": {
+            "visible": true,
+            "color": 1,
+            "layer": "C-TOPO-MAJR-UTNM",
+            "layerColor": 1,
+            "lineweight": 0.35
+          },
+          "MinorContour": {
+            "visible": true,
+            "color": 9,
+            "layer": "C-TOPO-MINR-UTNM",
+            "layerColor": 9,
+            "lineweight": 0.18
+          },
+          "Boundary": {
+            "visible": true,
+            "color": 3
+          },
+          "Triangles": {
+            "visible": false
+          },
+          "Points": {
+            "visible": false
+          }
+        },
+        "model": {
+          "Triangles": {
+            "visible": true,
+            "color": 8
+          }
+        }
+      },
+      "surface": {
+        "contours": {
+          "majorInterval": 2.5,
+          "minorInterval": 0.5,
+          "smooth": true,
+          "smoothingType": "AddVertices",
+          "smoothingFactor": 5,
+          "depressions": false
+        },
+        "boundary": {
+          "exterior": true,
+          "interior": true
+        }
+      }
+    },
+    {
+      "family": "surface",
+      "name": "UTNM Existing Ground 1m and 5m",
+      "description": "UTNM existing ground - 1 m / 5 m contours",
+      "display": {
+        "plan": {
+          "MajorContour": {
+            "visible": true,
+            "color": 30,
+            "layer": "C-TOPO-MAJR-UTNM",
+            "lineweight": 0.35
+          },
+          "MinorContour": {
+            "visible": true,
+            "color": 8,
+            "layer": "C-TOPO-MINR-UTNM",
+            "lineweight": 0.18
+          },
+          "Boundary": {
+            "visible": true,
+            "color": 5,
+            "linetype": "DASHED",
+            "lineweight": 0.25
+          },
+          "Triangles": {
+            "visible": false
+          },
+          "Points": {
+            "visible": false
+          }
+        }
+      },
+      "surface": {
+        "contours": {
+          "majorInterval": 5,
+          "minorInterval": 1,
+          "smooth": false
+        }
+      }
+    },
+    {
+      "family": "alignment",
+      "name": "UTNM Drain Centreline",
+      "description": "UTNM drain centreline - red tangents, magenta curves, PI markers",
+      "display": {
+        "plan": {
+          "Line": {
+            "visible": true,
+            "color": 1,
+            "layer": "C-ROAD-CNTR-UTNM",
+            "layerColor": 1,
+            "lineweight": 0.5
+          },
+          "Curve": {
+            "visible": true,
+            "color": 6,
+            "layer": "C-ROAD-CNTR-UTNM",
+            "layerColor": 1,
+            "lineweight": 0.5
+          },
+          "Spiral": {
+            "visible": true,
+            "color": 4,
+            "layer": "C-ROAD-CNTR-UTNM"
+          },
+          "Arrow": {
+            "visible": true,
+            "color": 1
+          },
+          "LineExtensions": {
+            "visible": false
+          },
+          "CurveExtensions": {
+            "visible": false
+          },
+          "TangentExtensions": {
+            "visible": false
+          }
+        },
+        "model": {
+          "Line": {
+            "visible": true,
+            "color": 1
+          },
+          "Curve": {
+            "visible": true,
+            "color": 6
+          }
+        }
+      },
+      "references": {
+        "beginPointMarkerStyle": "UTNM PI",
+        "endPointMarkerStyle": "UTNM PI",
+        "intersectionPointMarkerStyle": "UTNM PI",
+        "lineCurveIntersectPointMarkerStyle": "Alignment Geometry",
+        "curveLineIntersectPointMarkerStyle": "Alignment Geometry",
+        "midPointMarkerStyle": "_No Markers",
+        "throughPointMarkerStyle": "_No Markers",
+        "stationReferencePointMarkerStyle": "_No Markers"
+      },
+      "properties": {
+        "enableRadiusSnap": true,
+        "radiusSnapValue": 5
+      }
+    },
+    {
+      "family": "profile",
+      "name": "UTNM Drain Invert",
+      "description": "UTNM drain invert design profile",
+      "display": {
+        "profile": {
+          "Line": {
+            "visible": true,
+            "color": 1,
+            "layer": "C-ROAD-PROF-UTNM",
+            "layerColor": 1,
+            "lineweight": 0.5
+          },
+          "Curve": {
+            "visible": true,
+            "color": 6,
+            "layer": "C-ROAD-PROF-UTNM",
+            "lineweight": 0.5
+          },
+          "SymmetricalParabola": {
+            "visible": true,
+            "color": 6,
+            "layer": "C-ROAD-PROF-UTNM",
+            "lineweight": 0.5
+          },
+          "AsymmetricalParabola": {
+            "visible": true,
+            "color": 6,
+            "layer": "C-ROAD-PROF-UTNM"
+          },
+          "Arrow": {
+            "visible": false
+          },
+          "LineExtension": {
+            "visible": false
+          },
+          "ParabolicCurveExtension": {
+            "visible": false
+          }
+        }
+      },
+      "references": {
+        "beginPointMarkerStyle": "UTNM PI",
+        "endPointMarkerStyle": "UTNM PI",
+        "vIntersectionPointMarkerStyle": "UTNM PI",
+        "highPointMarkerStyle": "_No Markers",
+        "lowPointMarkerStyle": "_No Markers",
+        "throughPointMarkerStyle": "_No Markers"
+      }
+    },
+    {
+      "family": "corridor",
+      "name": "UTNM Drain Corridor",
+      "description": "UTNM drain corridor - region boundaries and assembly stations visible in plan",
+      "display": {
+        "plan": {
+          "RegionBoundaries": {
+            "visible": true,
+            "color": 3,
+            "layer": "C-ROAD-CORR-UTNM",
+            "layerColor": 3
+          },
+          "AssemblyInsertionStations": {
+            "visible": true,
+            "color": 8,
+            "layer": "C-ROAD-CORR-UTNM"
+          },
+          "ParameterOverrideStations": {
+            "visible": true,
+            "color": 2
+          },
+          "GeometricOverrideStations": {
+            "visible": true,
+            "color": 1
+          }
+        },
+        "model": {
+          "RegionBoundaries": {
+            "visible": false
+          },
+          "AssemblyInsertionStations": {
+            "visible": false
+          }
+        }
+      }
+    },
+    {
+      "family": "feature_line",
+      "name": "UTNM Drain Feature Line",
+      "description": "UTNM drain invert feature line",
+      "display": {
+        "plan": {
+          "FeatureLine": {
+            "visible": true,
+            "color": 1,
+            "layer": "GO-Drain",
+            "layerColor": 1,
+            "lineweight": 0.35
+          }
+        }
+      }
+    }
+  ]
+}

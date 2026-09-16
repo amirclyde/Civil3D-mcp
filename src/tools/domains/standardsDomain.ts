@@ -346,24 +346,6 @@ export const STANDARDS_DOMAIN_DEFINITION: DomainToolDefinition = {
       }),
     },
     {
-      toolName: "civil3d_style",
-      displayName: "Civil 3D Style",
-      description: "Lists and inspects Civil 3D styles for supported object types.",
-      inputShape: {
-        action: z.enum(["list", "get"]),
-        objectType: StyleObjectTypeSchema,
-        styleName: z.string().optional(),
-      },
-      supportedActions: ["style_list", "style_get"],
-      operations: ["list", "get"],
-      resolveAction: (rawArgs) => ({
-        action: rawArgs.action === "list" ? "style_list" : "style_get",
-        args: rawArgs.action === "list"
-          ? { action: "style_list", objectType: rawArgs.objectType }
-          : { action: "style_get", objectType: rawArgs.objectType, styleName: rawArgs.styleName },
-      }),
-    },
-    {
       toolName: "civil3d_standards_lookup",
       displayName: "Civil 3D Standards Lookup",
       description: "Looks up Civil 3D standards, template governance, layer/style guidance, and labeling conventions.",

@@ -1,0 +1,829 @@
+{
+  "$comment": "UTNM label styles + label sets (16 Sep 2026), from claude/utnm-alignment-profile-style-spec.md. Apply with civil3d_style library_apply {path}. Sizes are paper mm, angles degrees. Needs the object styles from alignment-profile-styles.json first only for the drawing, not for these styles. IP numbers come from <[Alignment PI Index]>; VIP numbers and PBT/PAT are written by civil3d_style place_labels {kind: profile_numbers}. MO and the K 'value+value' format wait for expression support.",
+  "styles": [
+    {
+      "family": "label:alignment/major_station",
+      "name": "UTNM Major Station",
+      "description": "UTNM: decimal station (700.000) perpendicular to the alignment on the left of a 1 mm tick",
+      "properties": {
+        "label": {
+          "layer": "0",
+          "textStyle": "Standard"
+        },
+        "behavior": {
+          "orientationReference": "Object"
+        },
+        "planReadability": {
+          "planReadable": true,
+          "planReadableBias": 110
+        }
+      },
+      "components": [
+        {
+          "name": "Tick",
+          "type": "Tick",
+          "tick": {
+            "blockName": "AeccTickLine",
+            "blockHeight": 1,
+            "alignWithObject": true,
+            "color": "ByLayer"
+          }
+        },
+        {
+          "name": "Station",
+          "type": "Text",
+          "general": {
+            "anchorLocation": "Station"
+          },
+          "text": {
+            "contents": "<[Station Value(Um|FD|P3|RN|AP|Sn|TP|B2|EN|W0|OF)]>",
+            "height": 1.8,
+            "attachment": "MiddleRight",
+            "angle": 90,
+            "xOffset": -0.5,
+            "yOffset": 0.6
+          },
+          "border": {
+            "visible": false
+          }
+        }
+      ]
+    },
+    {
+      "family": "label:alignment/geometry_point",
+      "name": "UTNM Geometry Point",
+      "description": "UTNM: station then point type (PC/PT/TS/SC/CS/ST/PBT/PAT), perpendicular, right of the alignment",
+      "properties": {
+        "label": {
+          "layer": "0"
+        },
+        "behavior": {
+          "orientationReference": "Object"
+        },
+        "planReadability": {
+          "planReadable": true,
+          "planReadableBias": 110
+        }
+      },
+      "components": [
+        {
+          "name": "Station",
+          "type": "Text",
+          "general": {
+            "anchorLocation": "Station"
+          },
+          "text": {
+            "contents": "<[Station Value(Um|FD|P3|RN|AP|Sn|TP|B2|EN|W0|OF)]>",
+            "height": 0.5,
+            "attachment": "MiddleLeft",
+            "angle": 90,
+            "xOffset": 0.3,
+            "yOffset": 0.6
+          },
+          "border": {
+            "visible": false
+          }
+        },
+        {
+          "name": "Type",
+          "type": "Text",
+          "general": {
+            "anchorComponent": "Station",
+            "anchorLocation": "MiddleRight"
+          },
+          "text": {
+            "contents": "<[Geometry Point Text(CP)]>",
+            "height": 0.5,
+            "attachment": "MiddleLeft",
+            "angle": 90,
+            "xOffset": 0.3,
+            "yOffset": 0
+          },
+          "border": {
+            "visible": false
+          }
+        }
+      ]
+    },
+    {
+      "family": "label:alignment/line",
+      "name": "UTNM Tangent",
+      "description": "UTNM: B=bearing (DMS) nearer the line, L=length outside, parallel at the tangent midpoint",
+      "properties": {
+        "label": {
+          "layer": "0"
+        },
+        "behavior": {
+          "orientationReference": "Object"
+        },
+        "planReadability": {
+          "planReadable": true,
+          "planReadableBias": 110
+        }
+      },
+      "components": [
+        {
+          "name": "Bearing",
+          "type": "Text",
+          "general": {
+            "anchorLocation": "Middle"
+          },
+          "text": {
+            "contents": "B=<[Tangent Direction(Udeg|FDMSdSp|P1|RN|AP|GC|UN)]>",
+            "height": 0.5,
+            "attachment": "BottomCenter",
+            "angle": 0,
+            "xOffset": 0,
+            "yOffset": 0.4
+          },
+          "border": {
+            "visible": false
+          }
+        },
+        {
+          "name": "Length",
+          "type": "Text",
+          "general": {
+            "anchorComponent": "Bearing",
+            "anchorLocation": "TopCenter"
+          },
+          "text": {
+            "contents": "L=<[Length(Um|P3|RN|AP|Sn|OF)]>",
+            "height": 0.5,
+            "attachment": "BottomCenter",
+            "angle": 0,
+            "xOffset": 0,
+            "yOffset": 0.2
+          },
+          "border": {
+            "visible": false
+          }
+        }
+      ]
+    },
+    {
+      "family": "label:alignment/curve",
+      "name": "UTNM Curve",
+      "description": "UTNM: Rc=radius and Lc=length at the curve midpoint (unsigned radius)",
+      "properties": {
+        "label": {
+          "layer": "0"
+        },
+        "behavior": {
+          "orientationReference": "Object"
+        },
+        "planReadability": {
+          "planReadable": true,
+          "planReadableBias": 110
+        }
+      },
+      "components": [
+        {
+          "name": "Radius",
+          "type": "Text",
+          "general": {
+            "anchorLocation": "Middle"
+          },
+          "text": {
+            "contents": "Rc=<[Radius(Um|P3|RN|AP|Sn|OF)]>",
+            "height": 0.5,
+            "attachment": "BottomCenter",
+            "angle": 0,
+            "xOffset": 0,
+            "yOffset": 0.4
+          },
+          "border": {
+            "visible": false
+          }
+        },
+        {
+          "name": "Length",
+          "type": "Text",
+          "general": {
+            "anchorComponent": "Radius",
+            "anchorLocation": "TopCenter"
+          },
+          "text": {
+            "contents": "Lc=<[Length(Um|P3|RN|AP|Sn|OF)]>",
+            "height": 0.5,
+            "attachment": "BottomCenter",
+            "angle": 0,
+            "xOffset": 0,
+            "yOffset": 0.2
+          },
+          "border": {
+            "visible": false
+          }
+        }
+      ]
+    },
+    {
+      "family": "label:alignment/spiral",
+      "name": "UTNM Spiral",
+      "description": "UTNM: Ls=spiral length at the spiral midpoint",
+      "properties": {
+        "label": {
+          "layer": "0"
+        },
+        "behavior": {
+          "orientationReference": "Object"
+        },
+        "planReadability": {
+          "planReadable": true,
+          "planReadableBias": 110
+        }
+      },
+      "components": [
+        {
+          "name": "Length",
+          "type": "Text",
+          "general": {
+            "anchorLocation": "Middle"
+          },
+          "text": {
+            "contents": "Ls=<[Length(Um|P3|RN|AP|Sn|OF)]>",
+            "height": 0.5,
+            "attachment": "BottomCenter",
+            "angle": 0,
+            "xOffset": 0,
+            "yOffset": 0.4
+          },
+          "border": {
+            "visible": false
+          }
+        }
+      ]
+    },
+    {
+      "family": "label:alignment/point_of_intersection",
+      "name": "UTNM IP Table",
+      "description": "UTNM: I.P. n / N / E then A, Ac, T, Es, L.C. \u2014 number and A/Ac/T/Es/L.C. are written by civil3d_style place_labels alignment_ip_tables from the alignment geometry (whole curve group, incl. spirals)",
+      "properties": {
+        "label": {
+          "layer": "0"
+        },
+        "behavior": {
+          "orientationReference": "View"
+        },
+        "planReadability": {
+          "planReadable": true
+        },
+        "draggedState": {
+          "textHeight": 2.5
+        }
+      },
+      "components": [
+        {
+          "name": "IP Number",
+          "type": "Text",
+          "general": {
+            "anchorLocation": "PointOfIntersection"
+          },
+          "text": {
+            "contents": "\\pql;I.P. <[Alignment PI Index(Sn|GC|UN)]>",
+            "height": 2.5,
+            "attachment": "TopLeft",
+            "angle": 0,
+            "xOffset": 2,
+            "yOffset": -2
+          },
+          "border": {
+            "visible": false
+          }
+        },
+        {
+          "name": "IP Coords",
+          "type": "Text",
+          "general": {
+            "anchorComponent": "IP Number",
+            "anchorLocation": "BottomLeft"
+          },
+          "text": {
+            "contents": "\\pql;N   <[PI Northing(Um|P3|RN|AP|Sn|OF)]>\\PE   <[PI Easting(Um|P3|RN|AP|Sn|OF)]>",
+            "height": 2.5,
+            "attachment": "TopLeft",
+            "angle": 0,
+            "xOffset": 0,
+            "yOffset": -1
+          },
+          "border": {
+            "visible": false
+          }
+        },
+        {
+          "name": "Curve Data",
+          "type": "TextForEach",
+          "selectedType": "Curve",
+          "general": {
+            "anchorComponent": "IP Coords",
+            "anchorLocation": "BottomLeft"
+          },
+          "text": {
+            "curveContents": "\\pql;A   = <[Curve PI Included Angle(Udeg|FDMSdSp|P1|RN|AP|Sn|EN|DZY|OF)]>\\PAc  = <[Curve Chord Direction(Udeg|FDMSdSp|P1|RN|AP|GC|UN)]>\\PT   = <[Curve Tangent Length(Um|P3|RN|AP|Sn|OF)]>\\PEs  = <[Curve External Secant(Um|P3|RN|AP|Sn|OF)]>\\PL.C. = <[Curve Long Chord(Um|P3|RN|AP|Sn|OF)]>",
+            "height": 2.5,
+            "attachment": "TopLeft",
+            "angle": 0,
+            "xOffset": 0,
+            "yOffset": -1
+          },
+          "border": {
+            "visible": false
+          }
+        }
+      ]
+    },
+    {
+      "family": "label:alignment/station_offset",
+      "name": "UTNM IP End",
+      "description": "UTNM: IP table at the alignment start/end (I.P. 1 / I.P. N, A = 0, T/Es/L.C. = 0.000) \u2014 filled by civil3d_style place_labels alignment_ip_tables",
+      "properties": {
+        "label": {
+          "layer": "0"
+        },
+        "behavior": {
+          "orientationReference": "View"
+        },
+        "planReadability": {
+          "planReadable": true
+        },
+        "draggedState": {
+          "textHeight": 2.5
+        }
+      },
+      "components": [
+        {
+          "name": "IP Number",
+          "type": "Text",
+          "text": {
+            "contents": "\\pql;I.P.",
+            "height": 2.5,
+            "attachment": "TopLeft",
+            "angle": 0,
+            "xOffset": 2,
+            "yOffset": -2
+          },
+          "border": {
+            "visible": false
+          }
+        },
+        {
+          "name": "IP Coords",
+          "type": "Text",
+          "general": {
+            "anchorComponent": "IP Number",
+            "anchorLocation": "BottomLeft"
+          },
+          "text": {
+            "contents": "\\pql;N   <[Northing(Um|P3|RN|AP|Sn|OF)]>\\PE   <[Easting(Um|P3|RN|AP|Sn|OF)]>",
+            "height": 2.5,
+            "attachment": "TopLeft",
+            "angle": 0,
+            "xOffset": 0,
+            "yOffset": -1
+          },
+          "border": {
+            "visible": false
+          }
+        },
+        {
+          "name": "Curve Data",
+          "type": "Text",
+          "general": {
+            "anchorComponent": "IP Coords",
+            "anchorLocation": "BottomLeft"
+          },
+          "text": {
+            "contents": "\\pql;A   = 0 00 00.0\\PAc  = -\\PT   = 0.000\\PEs  = 0.000\\PL.C. = 0.000",
+            "height": 2.5,
+            "attachment": "TopLeft",
+            "angle": 0,
+            "xOffset": 0,
+            "yOffset": -1
+          },
+          "border": {
+            "visible": false
+          }
+        }
+      ]
+    },
+    {
+      "family": "label_set:alignment",
+      "name": "UTNM Alignment Labels",
+      "description": "UTNM: 100 m stations and geometry points (begin/end/PC/PT/TS/SC/CS/ST); IP tables and tangent/curve/spiral labels are placed with civil3d_style place_labels",
+      "items": [
+        {
+          "style": "UTNM Major Station",
+          "increment": 100
+        },
+        {
+          "style": "UTNM Geometry Point",
+          "geometryPoints": [
+            "Begin",
+            "End",
+            "TanCurve",
+            "CurveTan",
+            "TanSpiral",
+            "SpiralTan",
+            "CurveSpiral",
+            "SpiralCurve"
+          ]
+        }
+      ]
+    },
+    {
+      "family": "label:profile/line",
+      "name": "UTNM Grade",
+      "description": "UTNM: G=grade% above the tangent at its midpoint",
+      "properties": {
+        "label": {
+          "layer": "0"
+        },
+        "behavior": {
+          "orientationReference": "Object"
+        },
+        "planReadability": {
+          "planReadable": true,
+          "planReadableBias": 110
+        }
+      },
+      "components": [
+        {
+          "name": "Grade",
+          "type": "Text",
+          "general": {
+            "anchorLocation": "TangentMiddle"
+          },
+          "text": {
+            "contents": "G=<[Tangent Grade(FP|P3|RN|AP|Sn|OF)]>",
+            "height": 2.5,
+            "attachment": "BottomCenter",
+            "angle": 0,
+            "xOffset": 0,
+            "yOffset": 0.75
+          },
+          "border": {
+            "visible": false
+          }
+        }
+      ]
+    },
+    {
+      "family": "label:profile/curve",
+      "name": "UTNM Vertical Curve",
+      "description": "UTNM: PC/PT vertical lines with CH./LEV., VIP table above the PVI (VIP NO. filled by place_labels profile_numbers)",
+      "properties": {
+        "label": {
+          "layer": "0"
+        },
+        "behavior": {
+          "orientationReference": "View"
+        },
+        "planReadability": {
+          "planReadable": true
+        }
+      },
+      "components": [
+        {
+          "name": "Start Line",
+          "type": "Line",
+          "general": {
+            "startAnchorPoint": "CurveStart",
+            "endAnchorPoint": "CurveStartDimension",
+            "useEndPointAnchor": true
+          },
+          "line": {
+            "color": 1
+          }
+        },
+        {
+          "name": "End Line",
+          "type": "Line",
+          "general": {
+            "startAnchorPoint": "CurveEnd",
+            "endAnchorPoint": "CurveEndDimension",
+            "useEndPointAnchor": true
+          },
+          "line": {
+            "color": 1
+          }
+        },
+        {
+          "name": "PC",
+          "type": "Text",
+          "general": {
+            "anchorComponent": "Start Line",
+            "anchorLocation": "Start"
+          },
+          "text": {
+            "contents": "PC",
+            "height": 2.5,
+            "attachment": "BottomLeft",
+            "angle": 0,
+            "xOffset": 0.4,
+            "yOffset": 2,
+            "color": 1
+          },
+          "border": {
+            "visible": false
+          }
+        },
+        {
+          "name": "PVC Station",
+          "type": "Text",
+          "general": {
+            "anchorComponent": "Start Line",
+            "anchorLocation": "End"
+          },
+          "text": {
+            "contents": "CH. <[Profile Curve Start Station(Um|FD|P3|RN|AP|Sn|TP|B2|EN|W0|OF)]>",
+            "height": 2.5,
+            "attachment": "BottomRight",
+            "angle": 0,
+            "xOffset": -0.4,
+            "yOffset": 0,
+            "color": 1
+          },
+          "border": {
+            "visible": false
+          }
+        },
+        {
+          "name": "PVC Elevation",
+          "type": "Text",
+          "general": {
+            "anchorComponent": "Start Line",
+            "anchorLocation": "End"
+          },
+          "text": {
+            "contents": "LEV. <[Profile Curve Start Elevation(Um|P3|RN|AP|Sn|OF)]>",
+            "height": 2.5,
+            "attachment": "TopRight",
+            "angle": 0,
+            "xOffset": 0.4,
+            "yOffset": 0,
+            "color": 1
+          },
+          "border": {
+            "visible": false
+          }
+        },
+        {
+          "name": "PT",
+          "type": "Text",
+          "general": {
+            "anchorComponent": "End Line",
+            "anchorLocation": "Start"
+          },
+          "text": {
+            "contents": "PT",
+            "height": 2.5,
+            "attachment": "BottomLeft",
+            "angle": 0,
+            "xOffset": 0.4,
+            "yOffset": 2,
+            "color": 1
+          },
+          "border": {
+            "visible": false
+          }
+        },
+        {
+          "name": "PVT Station",
+          "type": "Text",
+          "general": {
+            "anchorComponent": "End Line",
+            "anchorLocation": "End"
+          },
+          "text": {
+            "contents": "CH. <[Profile Curve End Station(Um|FD|P3|RN|AP|Sn|TP|B2|EN|W0|OF)]>",
+            "height": 2.5,
+            "attachment": "BottomRight",
+            "angle": 0,
+            "xOffset": -0.4,
+            "yOffset": 0,
+            "color": 1
+          },
+          "border": {
+            "visible": false
+          }
+        },
+        {
+          "name": "PVT Elevation",
+          "type": "Text",
+          "general": {
+            "anchorComponent": "End Line",
+            "anchorLocation": "End"
+          },
+          "text": {
+            "contents": "LEV. <[Profile Curve End Elevation(Um|P3|RN|AP|Sn|OF)]>",
+            "height": 2.5,
+            "attachment": "TopRight",
+            "angle": 0,
+            "xOffset": 0.4,
+            "yOffset": 0,
+            "color": 1
+          },
+          "border": {
+            "visible": false
+          }
+        },
+        {
+          "name": "VIP Number",
+          "type": "Text",
+          "general": {
+            "anchorLocation": "PVIDimension"
+          },
+          "text": {
+            "contents": "VIP NO.",
+            "height": 2.5,
+            "attachment": "BottomLeft",
+            "angle": 0,
+            "xOffset": -15,
+            "yOffset": 12,
+            "color": 1
+          },
+          "border": {
+            "visible": false
+          }
+        },
+        {
+          "name": "VIP Data",
+          "type": "Text",
+          "general": {
+            "anchorComponent": "VIP Number",
+            "anchorLocation": "BottomLeft"
+          },
+          "text": {
+            "contents": "VIP CH.  = <[PVI Station(Um|FD|P3|RN|AP|Sn|TP|B2|EN|W0|OF)]>\\PVIP ELEV = <[PVI Elevation(Um|P3|RN|AP|Sn|OF)]>\\PVCL      = <[Profile Curve Length(Um|P3|RN|AP|Sn|OF)]>\\PK        = <[K Value(P3|RN|AP|Sn|OF)]>",
+            "height": 2.5,
+            "attachment": "TopLeft",
+            "angle": 0,
+            "xOffset": 0,
+            "yOffset": -1,
+            "color": 1
+          },
+          "border": {
+            "visible": false
+          }
+        }
+      ]
+    },
+    {
+      "family": "label:profile/grade_break",
+      "name": "UTNM Profile End",
+      "description": "UTNM: start/end of profile (PBT/PAT): vertical line with CH./LEV. and the VIP table with VCL = - / K = - (VIP NO. and PBT/PAT filled by place_labels profile_numbers)",
+      "properties": {
+        "label": {
+          "layer": "0"
+        },
+        "behavior": {
+          "orientationReference": "View"
+        },
+        "planReadability": {
+          "planReadable": true
+        }
+      },
+      "components": [
+        {
+          "name": "Line",
+          "type": "Line",
+          "general": {
+            "startAnchorPoint": "PVI",
+            "endAnchorPoint": "PVIDimension",
+            "useEndPointAnchor": true
+          },
+          "line": {
+            "color": 1
+          }
+        },
+        {
+          "name": "Point Type",
+          "type": "Text",
+          "general": {
+            "anchorComponent": "Line",
+            "anchorLocation": "Start"
+          },
+          "text": {
+            "contents": "PBT",
+            "height": 2.5,
+            "attachment": "BottomLeft",
+            "angle": 0,
+            "xOffset": 0.4,
+            "yOffset": 2,
+            "color": 1
+          },
+          "border": {
+            "visible": false
+          }
+        },
+        {
+          "name": "Station",
+          "type": "Text",
+          "general": {
+            "anchorComponent": "Line",
+            "anchorLocation": "End"
+          },
+          "text": {
+            "contents": "CH. <[PVI Station(Um|FD|P3|RN|AP|Sn|TP|B2|EN|W0|OF)]>",
+            "height": 2.5,
+            "attachment": "BottomRight",
+            "angle": 0,
+            "xOffset": -0.4,
+            "yOffset": 0,
+            "color": 1
+          },
+          "border": {
+            "visible": false
+          }
+        },
+        {
+          "name": "Elevation",
+          "type": "Text",
+          "general": {
+            "anchorComponent": "Line",
+            "anchorLocation": "End"
+          },
+          "text": {
+            "contents": "LEV. <[PVI Elevation(Um|P3|RN|AP|Sn|OF)]>",
+            "height": 2.5,
+            "attachment": "TopRight",
+            "angle": 0,
+            "xOffset": 0.4,
+            "yOffset": 0,
+            "color": 1
+          },
+          "border": {
+            "visible": false
+          }
+        },
+        {
+          "name": "VIP Number",
+          "type": "Text",
+          "general": {
+            "anchorComponent": "Line",
+            "anchorLocation": "End"
+          },
+          "text": {
+            "contents": "VIP NO.",
+            "height": 2.5,
+            "attachment": "BottomLeft",
+            "angle": 0,
+            "xOffset": -15,
+            "yOffset": 12,
+            "color": 1
+          },
+          "border": {
+            "visible": false
+          }
+        },
+        {
+          "name": "VIP Data",
+          "type": "Text",
+          "general": {
+            "anchorComponent": "VIP Number",
+            "anchorLocation": "BottomLeft"
+          },
+          "text": {
+            "contents": "VIP CH.  = <[PVI Station(Um|FD|P3|RN|AP|Sn|TP|B2|EN|W0|OF)]>\\PVIP ELEV = <[PVI Elevation(Um|P3|RN|AP|Sn|OF)]>\\PVCL      = -\\PK        = -",
+            "height": 2.5,
+            "attachment": "TopLeft",
+            "angle": 0,
+            "xOffset": 0,
+            "yOffset": -1,
+            "color": 1
+          },
+          "border": {
+            "visible": false
+          }
+        }
+      ]
+    },
+    {
+      "family": "label_set:profile",
+      "name": "UTNM Profile Labels",
+      "description": "UTNM: grades on tangents, PC/PT + VIP tables on crest and sag curves, PBT/PAT tables at the profile ends",
+      "items": [
+        {
+          "style": "UTNM Grade"
+        },
+        {
+          "style": "UTNM Vertical Curve",
+          "curve": "crest",
+          "dimensionAnchorOption": "DistanceAbove",
+          "dimensionAnchorValue": 0.028
+        },
+        {
+          "style": "UTNM Vertical Curve",
+          "curve": "sag",
+          "dimensionAnchorOption": "DistanceAbove",
+          "dimensionAnchorValue": 0.028
+        },
+        {
+          "style": "UTNM Profile End",
+          "dimensionAnchorOption": "DistanceAbove",
+          "dimensionAnchorValue": 0.028
+        }
+      ]
+    }
+  ]
+}
