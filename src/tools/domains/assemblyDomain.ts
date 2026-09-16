@@ -17,12 +17,23 @@ const AssemblyListResponseSchema = z.object({
   assemblies: z.array(AssemblySummarySchema),
 });
 
+const SubassemblyPointSchema = z.object({
+  index: z.number(),
+  offset: z.number(),
+  elevation: z.number(),
+  codes: z.array(z.string()),
+}).passthrough();
+
 const SubassemblySchema = z.object({
   name: z.string(),
   side: z.enum(["left", "right", "none"]),
   className: z.string(),
-  parameters: z.record(AssemblyParameterValueSchema),
-});
+  isFromSubassemblyComposer: z.boolean().optional(),
+  parameters: z.record(z.unknown()),
+  points: z.array(SubassemblyPointSchema).optional(),
+  links: z.array(z.object({}).passthrough()).optional(),
+  shapes: z.array(z.object({}).passthrough()).optional(),
+}).passthrough();
 
 const AssemblyDetailResponseSchema = z.object({
   name: z.string(),
@@ -30,7 +41,7 @@ const AssemblyDetailResponseSchema = z.object({
   style: z.string(),
   subassemblies: z.array(SubassemblySchema),
   usedByCorridors: z.array(z.string()),
-});
+}).passthrough();
 
 const canonicalAssemblyInputShape = {
   action: z.enum(["list", "get", "create", "create_subassembly", "edit"]),
@@ -42,9 +53,10 @@ const canonicalAssemblyInputShape = {
   description: z.string().optional(),
   assemblyType: z.enum(["UndividedCrownedRoad", "UndividedPlanarRoad", "DividedCrownedRoad", "DividedPlanarRoad", "Other", "Railway"]).optional(),
   assemblyName: z.string().optional(),
-  subassemblyType: z.string().optional(),
-  side: z.enum(["Left", "Right", "Both"]).optional(),
-  parameters: z.record(AssemblyParameterValueSchema).optional(),
+  subassemblyType: z.string().optional().describe("Stock subassembly class (e.g. LinkWidthAndSlope, DaylightBench) or a path to a Subassembly Composer .pkt file."),
+  pktFilePath: z.string().optional().describe("Path to a Subassembly Composer .pkt package; when given, subassemblyType is only used as the display name."),
+  side: z.enum(["Left", "Right", "Both", "None"]).optional().describe("Omit (or None) for a subassembly that has no side, e.g. a symmetric drain or median. Both inserts one copy per side."),
+  parameters: z.record(AssemblyParameterValueSchema).optional().describe("Input parameter values keyed by the subassembly's parameter name (SAC name or stock key) or display name."),
   subassemblyName: z.string().optional(),
   delete: z.boolean().optional(),
 };
@@ -73,7 +85,9 @@ const AssemblyCreateSubassemblyArgsSchema = z.object({
   action: z.literal("create_subassembly"),
   assemblyName: z.string(),
   subassemblyType: z.string(),
-  side: z.enum(["Left", "Right", "Both"]),
+  pktFilePath: z.string().optional(),
+  subassemblyName: z.string().optional(),
+  side: z.enum(["Left", "Right", "Both", "None"]).optional(),
   parameters: z.record(AssemblyParameterValueSchema).optional(),
 });
 
@@ -145,7 +159,9 @@ export const ASSEMBLY_DOMAIN_DEFINITION: DomainToolDefinition = {
         async (appClient) => await appClient.sendCommand("createSubassembly", {
           assemblyName: args.assemblyName,
           subassemblyType: args.subassemblyType,
-          side: args.side,
+          pktFilePath: args.pktFilePath ?? null,
+          subassemblyName: args.subassemblyName ?? null,
+          side: args.side ?? null,
           parameters: args.parameters ?? {},
         }),
       ),
@@ -172,7 +188,7 @@ export const ASSEMBLY_DOMAIN_DEFINITION: DomainToolDefinition = {
     {
       toolName: "civil3d_assembly",
       displayName: "Civil 3D Assembly",
-      description: "Lists, inspects, creates, and edits Civil 3D assemblies and subassemblies through a single domain tool.",
+      description: "Lists, inspects, creates, and edits Civil 3D assemblies and subassemblies (stock classes or Subassembly Composer .pkt packages) through a single domain tool. 'get' returns each subassembly's parameters, points (offset/elevation/codes), links and shapes.",
       inputShape: canonicalAssemblyInputShape,
       supportedActions: ["list", "get", "create", "create_subassembly", "edit"],
       resolveAction: (rawArgs) => ({
@@ -208,11 +224,13 @@ export const ASSEMBLY_DOMAIN_DEFINITION: DomainToolDefinition = {
     {
       toolName: "civil3d_subassembly_create",
       displayName: "Civil 3D Subassembly Create",
-      description: "Adds a subassembly from the Civil 3D catalog to an existing assembly.",
+      description: "Adds a stock subassembly or a Subassembly Composer (.pkt) subassembly to an existing assembly.",
       inputShape: {
         assemblyName: z.string(),
         subassemblyType: z.string(),
-        side: z.enum(["Left", "Right", "Both"]),
+        pktFilePath: z.string().optional(),
+        subassemblyName: z.string().optional(),
+        side: z.enum(["Left", "Right", "Both", "None"]).optional(),
         parameters: z.record(AssemblyParameterValueSchema).optional(),
       },
       supportedActions: ["create_subassembly"],
@@ -222,6 +240,8 @@ export const ASSEMBLY_DOMAIN_DEFINITION: DomainToolDefinition = {
           action: "create_subassembly",
           assemblyName: rawArgs.assemblyName,
           subassemblyType: rawArgs.subassemblyType,
+          pktFilePath: rawArgs.pktFilePath,
+          subassemblyName: rawArgs.subassemblyName,
           side: rawArgs.side,
           parameters: rawArgs.parameters,
         },
