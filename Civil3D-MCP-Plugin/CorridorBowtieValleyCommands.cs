@@ -104,6 +104,7 @@ public static partial class CorridorBowtieCommands
     var dryRun = PluginRuntime.GetOptionalBool(parameters, "dryRun") ?? false;
     var style = PluginRuntime.GetOptionalString(parameters, "style");
     var layer = PluginRuntime.GetOptionalString(parameters, "layer");
+    var allowMismatch = PluginRuntime.GetOptionalBool(parameters, "allowMismatch") ?? false;
 
     if (side is not ("left" or "right"))
       throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "side must be left or right: the inside of the bend (bowtie_predict reports it).");
@@ -258,6 +259,35 @@ public static partial class CorridorBowtieCommands
       }
       var poly = SimplifyPolyline(raw, 0.005);
 
+      // ---- do the two legs carry the same section? (a region boundary with a different drain / lane level at the
+      // bend puts the valley far off the bisector and the construction below is no longer reliable)
+      var sPiA = legA.SO(piX, piY).S;
+      var sPiB = legB.SO(piX, piY).S;
+      var levelA = legA.Cz + legA.Grade * sPiA + legA.Template[0].Dz;
+      var levelB = legB.Cz + legB.Grade * sPiB + legB.Template[0].Dz;
+      var levelStep = levelA - levelB;
+      var hingeA = HingeOffset(legA);
+      var hingeB = HingeOffset(legB);
+      var mismatchReasons = new List<string>();
+      if (Math.Abs(levelStep) > 0.05) mismatchReasons.Add($"the inside edge levels differ by {levelStep:0.###} m at the PI");
+      if (Math.Abs(legA.Start - legB.Start) > 0.05) mismatchReasons.Add($"the inside links start at different offsets ({legA.Start:0.###} / {legB.Start:0.###} m)");
+      if (hingeA.HasValue && hingeB.HasValue && Math.Abs(hingeA.Value - hingeB.Value) > 0.05) mismatchReasons.Add($"the hinges are at different offsets ({hingeA:0.###} / {hingeB:0.###} m)");
+      var maxSideways = path.Max(p => Math.Abs(p.U));
+      var firstExact = path[0];
+      var skewed = Math.Abs(firstExact.U) > 0.25 * firstExact.T + 0.3;
+      if (skewed) mismatchReasons.Add($"the valley runs {Math.Abs(firstExact.U):0.##} m off the bisector {firstExact.T:0.#} m out from the PI");
+      var templatesMatch = mismatchReasons.Count == 0;
+      if (!templatesMatch)
+      {
+        var why = string.Join("; ", mismatchReasons);
+        if (!dryRun && !allowMismatch)
+          throw new JsonRpcDispatchException("CIVIL3D.INVALID_STATE",
+            $"The two legs of this bend do not carry the same inside section ({why}). This is a section change at the bend (e.g. a region boundary " +
+            "with a different drain), not a plain bowtie: a valley between two different templates is not the clean mitre the clip daylight expects. " +
+            "Nothing was changed. Run with dryRun to inspect it, move the section change off the bend, or pass allowMismatch true to build it anyway.");
+        warnings.Add($"The legs do not carry the same inside section ({why}); review the valley before using it.");
+      }
+
       // ---- where the valley meets the daylight surface
       CivilSurface? surface = null;
       string? surfaceUsed = null;
@@ -278,6 +308,11 @@ public static partial class CorridorBowtieCommands
           var (hx, hy, hz) = hit.Value;
           meetA = sA + legA.SO(hx, hy).S;
           meetB = sB + legB.SO(hx, hy).S;
+          if (bendType == "angle_point" && (meetA > piStation + 0.01 || meetB < piStation - 0.01))
+          {
+            warnings.Add($"The valley meets the ground at stations {meetA:0.###} / {meetB:0.###}, on the wrong side of the PI ({piStation:0.###}): no stations were added there.");
+            addStations = false;
+          }
           meet = new Dictionary<string, object?>
           {
             ["x"] = hx, ["y"] = hy, ["z"] = hz,
@@ -360,7 +395,9 @@ public static partial class CorridorBowtieCommands
           ["start"] = bendType == "curve" ? "curve_centre" : "pi",
           ["pointCount"] = poly.Count,
           ["exactSamples"] = path.Count,
-          ["maxSidewaysFromBisector"] = Math.Round(path.Max(p => Math.Abs(p.U)), 4),
+          ["maxSidewaysFromBisector"] = Math.Round(maxSideways, 4),
+          ["templatesMatch"] = templatesMatch,
+          ["levelStepAtPi"] = Math.Round(levelStep, 4),
           ["length"] = Math.Round(PolylineLength(poly), 4),
           ["points"] = poly.Select(p => new Dictionary<string, object?>
           {
@@ -683,6 +720,18 @@ public static partial class CorridorBowtieCommands
   private static ObjectId NoLabelsAlignmentLabelSet(CivilDocument civilDoc, Transaction transaction) =>
     LookupUtils.GetStyleIdPreferring(civilDoc.Styles.LabelSetStyles.AlignmentLabelSetStyles, transaction, null, new[] { "No Labels", "_No Labels" });
 
+  /// <summary>Offset where the template first turns from flat (|slope| &lt;= 0.1) to sloped.</summary>
+  private static double? HingeOffset(LegModel leg)
+  {
+    for (var i = 1; i < leg.Template.Count; i++)
+    {
+      var (o0, z0) = leg.Template[i - 1];
+      var (o1, z1) = leg.Template[i];
+      if (o1 - o0 > 1e-9 && Math.Abs((z1 - z0) / (o1 - o0)) > 0.1) return o0;
+    }
+    return null;
+  }
+
   private static Dictionary<string, object?> LegInfo(LegModel leg, string which) => new()
   {
     ["leg"] = which,
@@ -694,6 +743,72 @@ public static partial class CorridorBowtieCommands
     ["alreadyClipped"] = leg.Clipped,
     ["template"] = leg.Template.Select(t => new[] { Math.Round(t.Off, 4), Math.Round(t.Dz, 4) }).ToList(),
   };
+
+  // =========================================================================
+  // regionStations: list / delete / clear a region's added stations (e.g. the ones bowtie_valley adds)
+  // =========================================================================
+
+  public static Task<object?> CorridorRegionStationsAsync(JsonObject? parameters)
+  {
+    var corridorName = PluginRuntime.GetRequiredString(parameters, "corridorName");
+    var baselineIndex = PluginRuntime.GetOptionalInt(parameters, "baselineIndex") ?? 0;
+    var regionIndex = PluginRuntime.GetOptionalInt(parameters, "regionIndex");
+    var regionName = PluginRuntime.GetOptionalString(parameters, "regionName");
+    var operation = (PluginRuntime.GetOptionalString(parameters, "operation") ?? "list").Trim().ToLowerInvariant();
+    var rebuild = PluginRuntime.GetOptionalBool(parameters, "rebuild") ?? true;
+    var stationsNode = PluginRuntime.GetParameter(parameters, "stations") as JsonArray;
+    var wanted = new List<double>();
+    if (stationsNode != null)
+      foreach (var n in stationsNode) if (n != null && double.TryParse(n.ToString(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var v)) wanted.Add(v);
+    if (operation is not ("list" or "delete" or "clear"))
+      throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "operation must be list, delete (with stations) or clear.");
+    if (operation == "delete" && wanted.Count == 0)
+      throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "delete needs stations (the added stations to remove). Nothing was changed.");
+
+    return CivilExecution.WriteAsync<object?>((doc, civilDoc, database, transaction) =>
+    {
+      var corridor = CivilObjectUtils.FindCorridorByName(civilDoc, transaction, corridorName, operation == "list" ? OpenMode.ForRead : OpenMode.ForWrite);
+      var baseline = GetBaseline(corridor, baselineIndex);
+      var region = FindRegion(baseline, regionIndex, regionName);
+      double[] before;
+      try { before = region.AdditionalStations() ?? Array.Empty<double>(); } catch { before = Array.Empty<double>(); }
+      var results = new List<Dictionary<string, object?>>();
+      string? rebuildError = null;
+      if (operation == "clear")
+      {
+        region.ClearAdditionalStations();
+      }
+      else if (operation == "delete")
+      {
+        foreach (var w in wanted)
+        {
+          var match = before.Where(s => Math.Abs(s - w) < 0.001).Cast<double?>().FirstOrDefault();
+          if (!match.HasValue)
+          {
+            results.Add(new Dictionary<string, object?> { ["station"] = w, ["deleted"] = false, ["reason"] = "not an added station of this region" });
+            continue;
+          }
+          try { region.DeleteStation(match.Value); results.Add(new Dictionary<string, object?> { ["station"] = match.Value, ["deleted"] = true }); }
+          catch (Exception ex) { results.Add(new Dictionary<string, object?> { ["station"] = match.Value, ["deleted"] = false, ["reason"] = $"{ex.GetType().Name}: {ex.Message}" }); }
+        }
+      }
+      if (operation != "list" && rebuild) rebuildError = TryRebuild(corridor);
+      double[] after;
+      try { after = region.AdditionalStations() ?? Array.Empty<double>(); } catch { after = Array.Empty<double>(); }
+      return new Dictionary<string, object?>
+      {
+        ["corridorName"] = corridor.Name,
+        ["baselineIndex"] = baselineIndex,
+        ["regionName"] = region.Name,
+        ["operation"] = operation,
+        ["addedStationsBefore"] = before.OrderBy(x => x).ToList(),
+        ["addedStations"] = after.OrderBy(x => x).ToList(),
+        ["results"] = results,
+        ["rebuilt"] = operation != "list" && rebuild && rebuildError == null,
+        ["rebuildError"] = rebuildError,
+      };
+    });
+  }
 
   // =========================================================================
   // checkBowties
@@ -835,7 +950,7 @@ public static partial class CorridorBowtieCommands
         for (var i = 0; i + 1 < fl.Count; i++)
         {
           var dx = fl[i + 1].X - fl[i].X; var dy = fl[i + 1].Y - fl[i].Y;
-          if (Math.Sqrt(dx * dx + dy * dy) < 1e-6) continue;
+          if (Math.Sqrt(dx * dx + dy * dy) <= Math.Max(tolerance, 1e-6)) continue;
           if (dx * fl[i].Tx + dy * fl[i].Ty < -1e-6) backward.Add(fl[i].S);
         }
         totalCrossings += count;

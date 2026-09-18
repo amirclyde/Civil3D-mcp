@@ -696,7 +696,9 @@ public static partial class CorridorBowtieCommands
 
         for (var pi = 0; pi < parts.Count; pi++)
         {
-          var (a, b, region) = parts[pi];
+          var (a, b, partRegion) = parts[pi];
+          // Splitting an earlier part shifts the region list: look the region up again by station.
+          var region = RegionAtStation(baseline, 0.5 * (a + b)) ?? partRegion;
           if (b - a < 2 * RegionMargin)
           {
             skipped.Add(new Dictionary<string, object?> { ["startStation"] = a, ["endStation"] = b, ["reason"] = $"shorter than {2 * RegionMargin} m" });
@@ -757,6 +759,11 @@ public static partial class CorridorBowtieCommands
 
           var beforeName = splitStart ? region.Name : "";
           mid.Name = UniqueRegionName(baseline, targetName, mid);
+          if (tail != null)
+          {
+            // Split names the remainder "<parent> [Copy] [Copy]"; use "<parent> (2)", "(3)" ... instead.
+            try { tail.Name = UniqueRegionName(baseline, StripCopySuffix(parentName) + " (2)", tail); } catch (Exception ex) { PluginLog.Debug("Bowtie", "Rename of split remainder failed", ex); }
+          }
           var afterName = tail?.Name ?? "";
 
           if (assemblyId.HasValue) mid.AssemblyId = assemblyId.Value;
@@ -940,6 +947,15 @@ public static partial class CorridorBowtieCommands
       if (!existing.Contains(candidate)) return candidate;
     }
     return $"{wanted} {Guid.NewGuid():N}";
+  }
+
+  private static string StripCopySuffix(string name)
+  {
+    var n = (name ?? "").Trim();
+    while (n.EndsWith("[Copy]", StringComparison.OrdinalIgnoreCase)) n = n[..^6].TrimEnd();
+    // "(k)" from an earlier rename: keep the base only
+    var m = System.Text.RegularExpressions.Regex.Match(n, @"^(.*?)\s\(\d+\)$");
+    return m.Success ? m.Groups[1].Value : n;
   }
 
   private static void TryMatch(BaselineRegion target, BaselineRegion source)
