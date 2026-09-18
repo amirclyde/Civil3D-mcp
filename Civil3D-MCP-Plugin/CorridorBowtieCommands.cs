@@ -25,7 +25,7 @@ namespace Civil3DMcpPlugin;
 ///   Baseline.SortedStations / GetAppliedAssemblyAtStation / BaselineRegions, CalculatedPoint.StationOffsetElevationToBaseline,
 ///   BaselineRegion.Split / Merge / Match(RegionMatchType) / Name / AssemblyId / GetTargets / AppliedAssemblySetting.
 /// </summary>
-public static class CorridorBowtieCommands
+public static partial class CorridorBowtieCommands
 {
   /// <summary>BaselineRegion.Split needs the split station at least 0.01 inside the region.</summary>
   private const double RegionMargin = 0.01;

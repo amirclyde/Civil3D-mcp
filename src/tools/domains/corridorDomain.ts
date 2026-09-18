@@ -33,8 +33,10 @@ const CorridorRegionSchema = z.object({
 
 const CorridorBaselineSchema = z.object({
   name: z.string(),
+  featureLineBased: z.boolean().optional(),
   alignmentName: z.string(),
   profileName: z.string(),
+  featureLineName: z.string().nullable().optional(),
   regions: z.array(CorridorRegionSchema),
 });
 
@@ -375,6 +377,41 @@ const CorridorRegionMergeArgsSchema = z.object({
   rebuild: z.boolean().optional(),
 });
 
+const CorridorBowtieValleyArgsSchema = z.object({
+  action: z.literal("bowtie_valley"),
+  name: z.string(),
+  baselineIndex: z.number().int().nonnegative().optional(),
+  side: z.enum(["left", "right"]),
+  startStation: z.number(),
+  endStation: z.number(),
+  templateStationBefore: z.number().optional(),
+  templateStationAfter: z.number().optional(),
+  valleyName: z.string().optional(),
+  linkCode: z.string().optional(),
+  extension: z.number().nonnegative().optional(),
+  step: z.number().positive().max(1).optional(),
+  surfaceName: z.string().optional(),
+  addStations: z.boolean().optional(),
+  createAlignment: z.boolean().optional(),
+  style: z.string().optional(),
+  layer: z.string().optional(),
+  dryRun: z.boolean().optional(),
+});
+
+const CorridorBowtieCheckArgsSchema = z.object({
+  action: z.literal("bowtie_check"),
+  name: z.string(),
+  baselineIndex: z.number().int().nonnegative().optional(),
+  side: z.enum(["left", "right", "both"]).optional(),
+  startStation: z.number().optional(),
+  endStation: z.number().optional(),
+  linkCode: z.string().optional(),
+  minOffset: z.number().nonnegative().optional(),
+  code: z.string().optional(),
+  tolerance: z.number().nonnegative().optional(),
+  maxListed: z.number().int().positive().optional(),
+});
+
 // ─── Canonical input shape ────────────────────────────────────────────────────
 
 const canonicalCorridorInputShape = {
@@ -396,6 +433,8 @@ const canonicalCorridorInputShape = {
     "region_isolate",
     "region_merge",
     "bowtie_predict",
+    "bowtie_valley",
+    "bowtie_check",
     "section",
     "feature_line_codes",
     "feature_line_export",
@@ -426,7 +465,7 @@ const canonicalCorridorInputShape = {
   excludedCodes: z.array(z.string()).optional(),
   outputPath: z.string().optional().describe("export_solids: write to a new .dwg."),
   maxListed: z.number().int().positive().optional(),
-  code: z.string().optional().describe("feature_line_export: corridor feature line code. bowtie_predict: only points with this code define the inside edge (default: outermost point per side)."),
+  code: z.string().optional().describe("feature_line_export: corridor feature line code. bowtie_predict: only points with this code define the inside edge (default: outermost point per side). bowtie_check: feature line checked for loops (default Daylight)."),
   exportAs: z.enum(["alignment", "profile", "feature_line", "polyline3d"]).optional(),
   featureLineIndex: z.number().int().nonnegative().optional(),
   outputName: z.string().optional(),
@@ -453,7 +492,7 @@ const canonicalCorridorInputShape = {
   endStation: z.number().optional(),
   frequency: z.number().positive().optional().describe("Assembly frequency in drawing units, applied along tangents, curves, spirals and profile curves."),
   rebuild: z.boolean().optional().describe("Rebuild the corridor after the change (default true)."),
-  side: z.enum(["left", "right", "both"]).optional().describe("bowtie_predict: side(s) to scan (default both)."),
+  side: z.enum(["left", "right", "both"]).optional().describe("bowtie_predict / bowtie_check: side(s) to scan (default both). bowtie_valley: the inside of the bend (left or right)."),
   widthSource: z.enum(["built", "fixed"]).optional().describe("bowtie_predict: built = inside reach from the built corridor sections (default); fixed = insideWidth / leftWidth / rightWidth."),
   insideWidth: z.number().positive().optional().describe("bowtie_predict (fixed): inside reach in metres, both sides."),
   leftWidth: z.number().positive().optional(),
@@ -466,9 +505,19 @@ const canonicalCorridorInputShape = {
   ranges: z.array(CorridorStationRangeSchema).optional().describe("region_isolate: station ranges to give their own region - pass bowtie_predict's splitPlan."),
   namePrefix: z.string().optional().describe("region_isolate: name prefix for isolated regions (default BT)."),
   matchParent: z.boolean().optional().describe("region_split / region_isolate: copy the parent's assembly, targets and frequency onto the new pieces (default true)."),
-  dryRun: z.boolean().optional().describe("region_isolate: report the splits without changing the corridor."),
+  dryRun: z.boolean().optional().describe("region_isolate: report the splits without changing the corridor. bowtie_valley: compute the valley without creating the alignment or stations."),
   firstRegionIndex: z.number().int().nonnegative().optional().describe("region_merge: first region of the range to merge."),
   lastRegionIndex: z.number().int().nonnegative().optional().describe("region_merge: last region of the range to merge."),
+  templateStationBefore: z.number().optional().describe("bowtie_valley: applied station whose section is the incoming leg's template (default: last applied station at/before startStation; must be unclipped)."),
+  templateStationAfter: z.number().optional().describe("bowtie_valley: applied station whose section is the outgoing leg's template (default: first applied station at/after endStation)."),
+  valleyName: z.string().optional().describe("bowtie_valley: name of the valley alignment (default '<region> Valley L|R')."),
+  linkCode: z.string().optional().describe("bowtie_valley: link code whose chain is the design surface (default Top). bowtie_check: links tested for crossings (default Top)."),
+  extension: z.number().nonnegative().optional().describe("bowtie_valley: metres the templates are extended past their daylight (default 3)."),
+  step: z.number().positive().max(1).optional().describe("bowtie_valley: marching step along the bisector (default 0.1 m)."),
+  addStations: z.boolean().optional().describe("bowtie_valley: add a corridor station on each leg where the valley meets the daylight surface (default true)."),
+  createAlignment: z.boolean().optional().describe("bowtie_valley: create the valley alignment (default true; false = compute only)."),
+  minOffset: z.number().nonnegative().optional().describe("bowtie_check: only links reaching beyond this offset (e.g. past a drain's outer wall)."),
+  tolerance: z.number().nonnegative().optional().describe("bowtie_check: crossings closer than this to a link end count as touching (default 0.005 m)."),
 };
 
 // ─── Domain definition ────────────────────────────────────────────────────────
@@ -988,12 +1037,65 @@ export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
         }),
       ),
     },
+    bowtie_valley: {
+      action: "bowtie_valley",
+      inputSchema: CorridorBowtieValleyArgsSchema,
+      responseSchema: GenericCorridorResponseSchema,
+      capabilities: ["edit"],
+      requiresActiveDrawing: true,
+      safeForRetry: false,
+      pluginMethods: ["bowtieValley"],
+      execute: async (args) => await withApplicationConnection(
+        async (appClient) => await appClient.sendCommand("bowtieValley", {
+          corridorName: args.name,
+          baselineIndex: args.baselineIndex ?? 0,
+          side: args.side,
+          startStation: args.startStation,
+          endStation: args.endStation,
+          templateStationBefore: args.templateStationBefore ?? null,
+          templateStationAfter: args.templateStationAfter ?? null,
+          valleyName: args.valleyName ?? null,
+          linkCode: args.linkCode ?? null,
+          extension: args.extension ?? null,
+          step: args.step ?? null,
+          surfaceName: args.surfaceName ?? null,
+          addStations: args.addStations ?? true,
+          createAlignment: args.createAlignment ?? true,
+          style: args.style ?? null,
+          layer: args.layer ?? null,
+          dryRun: args.dryRun ?? false,
+        }),
+      ),
+    },
+    bowtie_check: {
+      action: "bowtie_check",
+      inputSchema: CorridorBowtieCheckArgsSchema,
+      responseSchema: GenericCorridorResponseSchema,
+      capabilities: ["query", "analyze"],
+      requiresActiveDrawing: true,
+      safeForRetry: true,
+      pluginMethods: ["checkCorridorBowties"],
+      execute: async (args) => await withApplicationConnection(
+        async (appClient) => await appClient.sendCommand("checkCorridorBowties", {
+          corridorName: args.name,
+          baselineIndex: args.baselineIndex ?? 0,
+          side: args.side ?? "both",
+          startStation: args.startStation ?? null,
+          endStation: args.endStation ?? null,
+          linkCode: args.linkCode ?? null,
+          minOffset: args.minOffset ?? null,
+          code: args.code ?? null,
+          tolerance: args.tolerance ?? null,
+          maxListed: args.maxListed ?? null,
+        }),
+      ),
+    },
   },
   exposures: [
     {
       toolName: "civil3d_corridor",
       displayName: "Civil 3D Corridor",
-      description: "Creates and reads Civil 3D corridors (create = assembly on an alignment + profile, or on a feature line, one baseline and region), controls rebuild, computes volumes, manages regions (add, split, isolate station ranges, merge, delete), predicts bowties (bowtie_predict: where the inside edge runs backwards or crosses itself, with a split plan), assembly frequency and subassembly target mappings, builds corridor surfaces (link/feature-line codes, overhang correction, boundaries) and extracts corridor solids through a single domain tool.",
+      description: "Creates and reads Civil 3D corridors (create = assembly on an alignment + profile, or on a feature line, one baseline and region), controls rebuild, computes volumes, manages regions (add, split, isolate station ranges, merge, delete), predicts bowties (bowtie_predict: where the inside edge runs backwards or crosses itself, with a split plan), builds the valley line of a bend as a clip target (bowtie_valley) and verifies the built result (bowtie_check: link crossings and feature-line loops), assembly frequency and subassembly target mappings, builds corridor surfaces (link/feature-line codes, overhang correction, boundaries) and extracts corridor solids through a single domain tool.",
       inputShape: canonicalCorridorInputShape,
       supportedActions: [
         "list",
@@ -1013,6 +1115,8 @@ export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
         "region_isolate",
         "region_merge",
         "bowtie_predict",
+        "bowtie_valley",
+        "bowtie_check",
         "section",
         "feature_line_codes",
         "feature_line_export",

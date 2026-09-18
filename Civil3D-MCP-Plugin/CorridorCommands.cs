@@ -48,11 +48,26 @@ public static class CorridorCommands
           });
         }
 
+        // Feature-line baselines throw on AlignmentId / ProfileId ("This operation on featureline-based baseline is invalid").
+        var featureLineBased = false;
+        try { featureLineBased = baseline.IsFeatureLineBased(); } catch { }
+        string? alignmentName = null, profileName = null, featureLineName = null;
+        if (featureLineBased)
+        {
+          try { featureLineName = CivilObjectUtils.GetName(transaction.GetObject(baseline.FeatureLineId, OpenMode.ForRead)); } catch { }
+        }
+        else
+        {
+          try { alignmentName = CivilObjectUtils.GetName(transaction.GetObject(baseline.AlignmentId, OpenMode.ForRead)); } catch { }
+          try { profileName = CivilObjectUtils.GetName(transaction.GetObject(baseline.ProfileId, OpenMode.ForRead)); } catch { }
+        }
         baselines.Add(new Dictionary<string, object?>
         {
           ["name"] = baseline.Name,
-          ["alignmentName"] = CivilObjectUtils.GetName(transaction.GetObject(baseline.AlignmentId, OpenMode.ForRead)) ?? string.Empty,
-          ["profileName"] = CivilObjectUtils.GetName(transaction.GetObject(baseline.ProfileId, OpenMode.ForRead)) ?? string.Empty,
+          ["featureLineBased"] = featureLineBased,
+          ["alignmentName"] = alignmentName ?? string.Empty,
+          ["profileName"] = profileName ?? string.Empty,
+          ["featureLineName"] = featureLineName,
           ["regions"] = regions,
         });
       }

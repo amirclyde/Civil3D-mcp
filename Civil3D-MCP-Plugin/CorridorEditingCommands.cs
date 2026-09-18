@@ -673,7 +673,7 @@ public static class CorridorEditingCommands
             Alignment target;
             if (!string.IsNullOrWhiteSpace(targetAlignmentName))
               target = CivilObjectUtils.FindAlignmentByName(civilDoc, transaction, targetAlignmentName);
-            else if (!baseline.AlignmentId.IsNull)
+            else if (!baseline.IsFeatureLineBased() && !baseline.AlignmentId.IsNull)
               target = CivilObjectUtils.GetRequiredObject<Alignment>(transaction, baseline.AlignmentId, OpenMode.ForRead);
             else
               throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "This baseline is feature-line based; pass alignmentName for the profile's parent alignment.");
