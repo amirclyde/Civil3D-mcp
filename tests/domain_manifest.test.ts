@@ -106,9 +106,15 @@ describe("domain manifest migration", () => {
     expect(pipe!.operations).toContain("catalog_list");
     expect(pipe!.operations).toContain("calculate_hgl");
     expect(pipe!.operations).toContain("size_network");
-    expect(pipe!.operations).toContain("create_pressure_network");
-    expect(pipe!.operations).toContain("add_pressure_pipe");
+    expect(pipe!.operations).toContain("add_structure");
+    expect(pipe!.operations).toContain("edit_network");
+    expect(pipe!.operations).not.toContain("check_interference");
     expect(pipe!.safeForRetry).toBe(false);
+
+    const pressure = GENERATED_TOOL_CATALOG_ENTRIES.find((e) => e.toolName === "civil3d_pressure");
+    expect(pressure).toBeDefined();
+    expect(pressure!.operations).toContain("create");
+    expect(pressure!.operations).toContain("add_pipe");
 
     expect(pipeNetwork).toBeDefined();
     expect(pressureList).toBeDefined();
@@ -507,7 +513,7 @@ describe("domain manifest migration", () => {
     expect(profile!.operations).toContain("report");
     expect(profile!.operations).toContain("view_create");
     expect(pipe).toBeDefined();
-    expect(pipe!.operations).toContain("list_pressure_networks");
+    expect(TOOL_CATALOG.find((entry) => entry.toolName === "civil3d_pressure")!.operations).toContain("list");
     expect(pipe!.operations).toContain("automate_profile_view");
     expect(assembly).toBeDefined();
     expect(assembly!.operations).toContain("create_subassembly");

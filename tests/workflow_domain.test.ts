@@ -433,13 +433,13 @@ describe("workflow domain execution", () => {
             name: args.name,
             partsList: "RCP",
             pipes: [
-              { name: "P-1", diameter: 12, slope: 1, length: 100 },
+              { name: "P-1", partSize: "300 mm RCP", innerDiameterOrWidth: 0.3, slopePercent: 1, length2D: 100 },
             ],
           };
         case "listPipePartsCatalog":
           return {
             partsLists: [
-              { name: "RCP", parts: ["12in RCP", "18in RCP", "24in RCP"] },
+              { name: "RCP", pipeFamilies: [{ name: "Concrete Pipe", sizes: [{ name: "300 mm RCP", innerDiameter: 0.3 }, { name: "450 mm RCP", innerDiameter: 0.45 }, { name: "600 mm RCP", innerDiameter: 0.6 }] }] },
             ],
           };
         case "analyzePipeNetworkHydraulics":

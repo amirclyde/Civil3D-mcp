@@ -13,6 +13,7 @@ import { PROFILE_DOMAIN_DEFINITION } from "./domains/profileDomain.js";
 import { CORRIDOR_DOMAIN_DEFINITION } from "./domains/corridorDomain.js";
 import { SECTION_DOMAIN_DEFINITION } from "./domains/sectionDomain.js";
 import { PIPE_DOMAIN_DEFINITION } from "./domains/pipeDomain.js";
+import { PRESSURE_DOMAIN_DEFINITION } from "./domains/pressureDomain.js";
 import { ASSEMBLY_DOMAIN_DEFINITION } from "./domains/assemblyDomain.js";
 import { POINT_DOMAIN_DEFINITION } from "./domains/pointDomain.js";
 import { GRADING_DOMAIN_DEFINITION } from "./domains/gradingDomain.js";
@@ -48,6 +49,7 @@ export const MIGRATED_DOMAIN_DEFINITIONS = [
   CORRIDOR_DOMAIN_DEFINITION,
   SECTION_DOMAIN_DEFINITION,
   PIPE_DOMAIN_DEFINITION,
+  PRESSURE_DOMAIN_DEFINITION,
   ASSEMBLY_DOMAIN_DEFINITION,
   POINT_DOMAIN_DEFINITION,
   GRADING_DOMAIN_DEFINITION,

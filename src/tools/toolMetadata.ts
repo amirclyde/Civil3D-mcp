@@ -10,6 +10,7 @@ export type ToolDomain =
   | "corridor"
   | "section"
   | "pipe"
+  | "pressure"
   | "parcel"
   | "quantity_takeoff"
   | "standards"
