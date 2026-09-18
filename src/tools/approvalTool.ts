@@ -40,13 +40,20 @@ function resolveApprovalTarget(args: { toolName: string; action: string; paramet
 
   const resolved = target.exposure.resolveAction(args.parameters);
   if (resolved.action !== args.action) {
-    throw new Error(
-      `Parameters do not resolve to action '${args.action}' for tool '${args.toolName}'. ` +
-      "Include the tool action in parameters when calling a multi-action tool.",
-    );
+    // Some actions run as another (e.g. read-only) action for certain parameters, such as a dry run: judge the action
+    // that will actually run, so the token (or the "no approval needed" answer) matches the call.
+    const actual = resolved.action ? findManifestAction(args.toolName, resolved.action) : undefined;
+    if (!actual || actual.exposure !== target.exposure) {
+      throw new Error(
+        `Parameters do not resolve to action '${args.action}' for tool '${args.toolName}'. ` +
+        "Include the tool action in parameters when calling a multi-action tool.",
+      );
+    }
+    actual.actionDefinition.inputSchema.parse(resolved.args);
+    return { ...actual, action: resolved.action };
   }
   target.actionDefinition.inputSchema.parse(resolved.args);
-  return target;
+  return { ...target, action: args.action };
 }
 
 function successResult(structuredContent: JsonObject) {
@@ -74,7 +81,7 @@ export function registerApprovalTool(server: McpServer) {
       const target = resolveApprovalTarget(args);
       const requiresApproval = isApprovalRequired({
         toolName: args.toolName,
-        action: args.action,
+        action: target.action,
         capabilities: target.actionDefinition.capabilities,
         safeForRetry: target.actionDefinition.safeForRetry,
         requiresActiveDrawing: target.actionDefinition.requiresActiveDrawing,
@@ -82,7 +89,7 @@ export function registerApprovalTool(server: McpServer) {
       return successResult({
         status: requiresApproval ? "approval_required" : "ready",
         toolName: args.toolName,
-        action: args.action,
+        action: target.action,
         capabilities: target.actionDefinition.capabilities,
         safeForRetry: target.actionDefinition.safeForRetry,
         instruction: requiresApproval
@@ -106,7 +113,7 @@ export function registerApprovalTool(server: McpServer) {
       const receipt = await approvalPolicy.requestApproval(
         {
           toolName: args.toolName,
-          action: args.action,
+          action: target.action,
           capabilities: target.actionDefinition.capabilities,
           safeForRetry: target.actionDefinition.safeForRetry,
           requiresActiveDrawing: target.actionDefinition.requiresActiveDrawing,
@@ -118,7 +125,7 @@ export function registerApprovalTool(server: McpServer) {
       return successResult({
         status: "approved",
         toolName: args.toolName,
-        action: args.action,
+        action: target.action,
         ...receipt,
         instruction: "Retry the approved tool call with approvalToken and the identical parameters.",
       });

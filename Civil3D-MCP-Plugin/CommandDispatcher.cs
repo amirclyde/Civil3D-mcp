@@ -150,6 +150,7 @@ public static class CommandDispatcher
       "isolateCorridorRanges" => CorridorBowtieCommands.IsolateCorridorRangesAsync(parameters),
       "mergeCorridorRegions" => CorridorBowtieCommands.MergeCorridorRegionsAsync(parameters),
       "bowtieValley" => CorridorBowtieCommands.BowtieValleyAsync(parameters),
+      "bowtieRefresh" => CorridorBowtieCommands.BowtieRefreshAsync(parameters),
       "checkCorridorBowties" => CorridorBowtieCommands.CheckBowtiesAsync(parameters),
       "corridorRegionStations" => CorridorBowtieCommands.CorridorRegionStationsAsync(parameters),
       "listIntersections" => IntersectionCommands.ListIntersectionsAsync(parameters),

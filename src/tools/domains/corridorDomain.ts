@@ -399,6 +399,30 @@ const CorridorBowtieValleyArgsSchema = z.object({
   allowMismatch: z.boolean().optional(),
 });
 
+const CorridorBowtieValleyPreviewArgsSchema = CorridorBowtieValleyArgsSchema.extend({
+  action: z.literal("bowtie_valley_preview"),
+});
+
+const CorridorBowtieRefreshArgsSchema = z.object({
+  action: z.literal("bowtie_refresh"),
+  name: z.string(),
+  baselineIndex: z.number().int().nonnegative().optional(),
+  regionName: z.string().optional(),
+  linkCode: z.string().optional(),
+  extension: z.number().nonnegative().optional(),
+  step: z.number().positive().max(1).optional(),
+  surfaceName: z.string().optional(),
+  tolerance: z.number().positive().optional(),
+  dryRun: z.boolean().optional(),
+  rebuild: z.boolean().optional(),
+  rebuildFirst: z.boolean().optional(),
+  allowMismatch: z.boolean().optional(),
+});
+
+const CorridorBowtieRefreshPreviewArgsSchema = CorridorBowtieRefreshArgsSchema.extend({
+  action: z.literal("bowtie_refresh_preview"),
+});
+
 const CorridorRegionStationsArgsSchema = z.object({
   action: z.literal("region_stations"),
   name: z.string(),
@@ -408,6 +432,11 @@ const CorridorRegionStationsArgsSchema = z.object({
   operation: z.enum(["list", "delete", "clear"]).optional(),
   stations: z.array(z.number()).optional(),
   rebuild: z.boolean().optional(),
+});
+
+const CorridorRegionStationsListArgsSchema = CorridorRegionStationsArgsSchema.extend({
+  action: z.literal("region_stations_list"),
+  operation: z.literal("list").optional(),
 });
 
 const CorridorBowtieCheckArgsSchema = z.object({
@@ -446,6 +475,7 @@ const canonicalCorridorInputShape = {
     "region_merge",
     "bowtie_predict",
     "bowtie_valley",
+    "bowtie_refresh",
     "bowtie_check",
     "region_stations",
     "section",
@@ -458,7 +488,7 @@ const canonicalCorridorInputShape = {
     "export_solids",
   ]),
   name: z.string().optional().describe("Corridor name."),
-  surfaceName: z.string().optional().describe("surface_*: corridor surface name."),
+  surfaceName: z.string().optional().describe("surface_*: corridor surface name. bowtie_valley / bowtie_refresh: daylight surface (default: the region's surface target)."),
   linkCodes: z.array(CorridorLinkCodeSchema).optional().describe("surface_create / add_link_code: link codes (string or {code, breakline})."),
   featureLineCodes: z.array(z.string()).optional(),
   overhangCorrection: z.enum(["none", "top_links", "bottom_links"]).optional(),
@@ -494,7 +524,7 @@ const canonicalCorridorInputShape = {
   featureLineName: z.string().optional().describe("create: use a feature line as the baseline instead of alignment + profile (stations run 0 to its length)."),
   featureLineHandle: z.string().optional().describe("create: feature line by AutoCAD handle, for unnamed or duplicate-named feature lines."),
   baselineName: z.string().optional(),
-  regionName: z.string().optional(),
+  regionName: z.string().optional().describe("region_stations: the region (or regionIndex). bowtie_refresh: only this region (default: every region whose ClipTarget is mapped to an alignment)."),
   corridorSurface: z.string().optional(),
   referenceSurface: z.string().optional(),
   regionIndex: z.number().int().nonnegative().optional(),
@@ -518,24 +548,62 @@ const canonicalCorridorInputShape = {
   ranges: z.array(CorridorStationRangeSchema).optional().describe("region_isolate: station ranges to give their own region - pass bowtie_predict's splitPlan."),
   namePrefix: z.string().optional().describe("region_isolate: name prefix for isolated regions (default BT)."),
   matchParent: z.boolean().optional().describe("region_split / region_isolate: copy the parent's assembly, targets and frequency onto the new pieces (default true)."),
-  dryRun: z.boolean().optional().describe("region_isolate: report the splits without changing the corridor. bowtie_valley: compute the valley without creating the alignment or stations."),
+  dryRun: z.boolean().optional().describe("region_isolate: report the splits without changing the corridor. bowtie_valley / bowtie_refresh: compute and check without changing anything (read-only, needs no approval)."),
   firstRegionIndex: z.number().int().nonnegative().optional().describe("region_merge: first region of the range to merge."),
   lastRegionIndex: z.number().int().nonnegative().optional().describe("region_merge: last region of the range to merge."),
   templateStationBefore: z.number().optional().describe("bowtie_valley: applied station whose section is the incoming leg's template (default: last applied station at/before startStation; must be unclipped)."),
   templateStationAfter: z.number().optional().describe("bowtie_valley: applied station whose section is the outgoing leg's template (default: first applied station at/after endStation)."),
-  valleyName: z.string().optional().describe("bowtie_valley: name of the valley alignment (default '<region> Valley L|R')."),
+  valleyName: z.string().optional().describe("bowtie_valley: name of the valley alignment (default '<corridor> <region> Valley L|R')."),
   linkCode: z.string().optional().describe("bowtie_valley: link code whose chain is the design surface (default Top). bowtie_check: links tested for crossings (default Top)."),
   extension: z.number().nonnegative().optional().describe("bowtie_valley: metres the templates are extended past their daylight (default 3)."),
   step: z.number().positive().max(1).optional().describe("bowtie_valley: marching step along the bisector (default 0.1 m)."),
   addStations: z.boolean().optional().describe("bowtie_valley: add a corridor station on each leg where the valley meets the daylight surface (default true)."),
   createAlignment: z.boolean().optional().describe("bowtie_valley: create the valley alignment (default true; false = compute only)."),
   minOffset: z.number().nonnegative().optional().describe("bowtie_check: only links reaching beyond this offset (e.g. past a drain's outer wall)."),
-  tolerance: z.number().nonnegative().optional().describe("bowtie_check: crossings closer than this to a link end count as touching (default 0.005 m)."),
-  allowMismatch: z.boolean().optional().describe("bowtie_valley: build the valley even when the two legs carry different inside sections (a section change at the bend); default false = refuse."),
+  tolerance: z.number().nonnegative().optional().describe("bowtie_check: crossings closer than this to a link end count as touching (default 0.005 m). bowtie_refresh: a valley that moved less than this stays as it is (default 0.01 m)."),
+  allowMismatch: z.boolean().optional().describe("bowtie_valley / bowtie_refresh: build the valley even when a check fails (different inside sections, meet stations not straddling the bend or outside the region); default false = refuse."),
+  rebuildFirst: z.boolean().optional().describe("bowtie_refresh: rebuild the corridor before reading its sections (default true; dry runs never rebuild)."),
   stations: z.array(z.number()).optional().describe("region_stations delete: added stations to remove."),
 };
 
 // ─── Domain definition ────────────────────────────────────────────────────────
+
+
+type CorridorRawArgs = Record<string, unknown>;
+
+/**
+ * Read-only variants of edit actions run without approval: bowtie_valley / bowtie_refresh with dryRun true and
+ * region_stations with operation list (or none) resolve to their *_preview / *_list actions.
+ */
+function resolveCorridorAction(rawArgs: CorridorRawArgs): { action: string; args: CorridorRawArgs } {
+  const action = String(rawArgs.action ?? "");
+  if ((action === "bowtie_valley" || action === "bowtie_refresh") && rawArgs.dryRun === true) {
+    const preview = `${action}_preview`;
+    return { action: preview, args: { ...rawArgs, action: preview } };
+  }
+  if (action === "region_stations" && (rawArgs.operation === undefined || rawArgs.operation === null || rawArgs.operation === "list")) {
+    const { operation: _operation, ...rest } = rawArgs;
+    return { action: "region_stations_list", args: { ...rest, action: "region_stations_list" } };
+  }
+  return { action, args: rawArgs };
+}
+
+function bowtieRefreshParams(args: CorridorRawArgs, dryRun: boolean) {
+  return {
+    corridorName: args.name,
+    baselineIndex: args.baselineIndex ?? 0,
+    regionName: args.regionName ?? null,
+    linkCode: args.linkCode ?? null,
+    extension: args.extension ?? null,
+    step: args.step ?? null,
+    surfaceName: args.surfaceName ?? null,
+    tolerance: args.tolerance ?? null,
+    dryRun,
+    rebuild: args.rebuild ?? true,
+    rebuildFirst: dryRun ? false : (args.rebuildFirst ?? true),
+    allowMismatch: args.allowMismatch ?? false,
+  };
+}
 
 export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
   domain: "corridor",
@@ -1083,6 +1151,63 @@ export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
         }),
       ),
     },
+    // bowtie_valley with dryRun: true resolves here - read-only, so no approval.
+    bowtie_valley_preview: {
+      action: "bowtie_valley_preview",
+      inputSchema: CorridorBowtieValleyPreviewArgsSchema,
+      responseSchema: GenericCorridorResponseSchema,
+      capabilities: ["query", "analyze"],
+      requiresActiveDrawing: true,
+      safeForRetry: true,
+      pluginMethods: ["bowtieValley"],
+      execute: async (args) => await withApplicationConnection(
+        async (appClient) => await appClient.sendCommand("bowtieValley", {
+          corridorName: args.name,
+          baselineIndex: args.baselineIndex ?? 0,
+          side: args.side,
+          startStation: args.startStation,
+          endStation: args.endStation,
+          templateStationBefore: args.templateStationBefore ?? null,
+          templateStationAfter: args.templateStationAfter ?? null,
+          valleyName: args.valleyName ?? null,
+          linkCode: args.linkCode ?? null,
+          extension: args.extension ?? null,
+          step: args.step ?? null,
+          surfaceName: args.surfaceName ?? null,
+          addStations: args.addStations ?? true,
+          createAlignment: args.createAlignment ?? true,
+          style: args.style ?? null,
+          layer: args.layer ?? null,
+          dryRun: true,
+          allowMismatch: args.allowMismatch ?? false,
+        }),
+      ),
+    },
+    bowtie_refresh: {
+      action: "bowtie_refresh",
+      inputSchema: CorridorBowtieRefreshArgsSchema,
+      responseSchema: GenericCorridorResponseSchema,
+      capabilities: ["edit"],
+      requiresActiveDrawing: true,
+      safeForRetry: false,
+      pluginMethods: ["bowtieRefresh"],
+      execute: async (args) => await withApplicationConnection(
+        async (appClient) => await appClient.sendCommand("bowtieRefresh", bowtieRefreshParams(args, args.dryRun === true)),
+      ),
+    },
+    // bowtie_refresh with dryRun: true resolves here - read-only, so no approval.
+    bowtie_refresh_preview: {
+      action: "bowtie_refresh_preview",
+      inputSchema: CorridorBowtieRefreshPreviewArgsSchema,
+      responseSchema: GenericCorridorResponseSchema,
+      capabilities: ["query", "analyze"],
+      requiresActiveDrawing: true,
+      safeForRetry: true,
+      pluginMethods: ["bowtieRefresh"],
+      execute: async (args) => await withApplicationConnection(
+        async (appClient) => await appClient.sendCommand("bowtieRefresh", bowtieRefreshParams(args, true)),
+      ),
+    },
     region_stations: {
       action: "region_stations",
       inputSchema: CorridorRegionStationsArgsSchema,
@@ -1100,6 +1225,27 @@ export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
           operation: args.operation ?? "list",
           stations: args.stations ?? null,
           rebuild: args.rebuild ?? true,
+        }),
+      ),
+    },
+    // region_stations with operation list (or none) resolves here - read-only, so no approval.
+    region_stations_list: {
+      action: "region_stations_list",
+      inputSchema: CorridorRegionStationsListArgsSchema,
+      responseSchema: GenericCorridorResponseSchema,
+      capabilities: ["query"],
+      requiresActiveDrawing: true,
+      safeForRetry: true,
+      pluginMethods: ["corridorRegionStations"],
+      execute: async (args) => await withApplicationConnection(
+        async (appClient) => await appClient.sendCommand("corridorRegionStations", {
+          corridorName: args.name,
+          baselineIndex: args.baselineIndex ?? 0,
+          regionIndex: args.regionIndex ?? null,
+          regionName: args.regionName ?? null,
+          operation: "list",
+          stations: null,
+          rebuild: false,
         }),
       ),
     },
@@ -1131,7 +1277,7 @@ export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
     {
       toolName: "civil3d_corridor",
       displayName: "Civil 3D Corridor",
-      description: "Creates and reads Civil 3D corridors (create = assembly on an alignment + profile, or on a feature line, one baseline and region), controls rebuild, computes volumes, manages regions (add, split, isolate station ranges, merge, delete), predicts bowties (bowtie_predict: where the inside edge runs backwards or crosses itself, with a split plan), builds the valley line of a bend as a clip target (bowtie_valley) and verifies the built result (bowtie_check: link crossings and feature-line loops), lists or removes a region's added stations (region_stations), assembly frequency and subassembly target mappings, builds corridor surfaces (link/feature-line codes, overhang correction, boundaries) and extracts corridor solids through a single domain tool.",
+      description: "Creates and reads Civil 3D corridors (create = assembly on an alignment + profile, or on a feature line, one baseline and region), controls rebuild, computes volumes, manages regions (add, split, isolate station ranges, merge, delete), predicts bowties (bowtie_predict: where the inside edge runs backwards or crosses itself, with a split plan), builds the valley line of a bend as a clip target (bowtie_valley; refuses bends whose legs differ or whose valley meets the ground on the wrong side or outside the region) and refreshes every mapped valley after a design change (bowtie_refresh), verifies the built result (bowtie_check: link crossings and feature-line loops), lists or removes a region's added stations (region_stations); dry runs and listings need no approval, assembly frequency and subassembly target mappings, builds corridor surfaces (link/feature-line codes, overhang correction, boundaries) and extracts corridor solids through a single domain tool.",
       inputShape: canonicalCorridorInputShape,
       supportedActions: [
         "list",
@@ -1152,8 +1298,12 @@ export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
         "region_merge",
         "bowtie_predict",
         "bowtie_valley",
+        "bowtie_valley_preview",
+        "bowtie_refresh",
+        "bowtie_refresh_preview",
         "bowtie_check",
         "region_stations",
+        "region_stations_list",
         "section",
         "feature_line_codes",
         "feature_line_export",
@@ -1163,10 +1313,7 @@ export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
         "surface_delete",
         "export_solids",
       ],
-      resolveAction: (rawArgs) => ({
-        action: String(rawArgs.action ?? ""),
-        args: rawArgs,
-      }),
+      resolveAction: resolveCorridorAction,
     },
     {
       toolName: "civil3d_corridor_summary",
