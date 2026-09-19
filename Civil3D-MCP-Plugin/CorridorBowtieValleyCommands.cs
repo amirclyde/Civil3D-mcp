@@ -150,14 +150,20 @@ public static partial class CorridorBowtieCommands
 
       // ---- template stations: the last applied stations at/before the bowtie and the first at/after it (the nearest pair
       // first, then up to two more on each side if the nearest one gives no usable valley)
+      var sign = side == "left" ? -1.0 : 1.0;
+      var bendRegion = RegionAtStation(baseline, 0.5 * (startStation + endStation));
+      var bendAssembly = bendRegion == null ? null : SafeAssemblyId(bendRegion);
+      var clippedTemplates = new HashSet<double>();
       var candA = templateBefore.HasValue
         ? new List<double> { templateBefore.Value }
-        : stations.Where(s => s <= startStation + StationTolerance).OrderByDescending(s => s).Take(3).ToList();
+        : TemplateCandidates(baseline, stations.Where(s => s <= startStation + StationTolerance).OrderByDescending(s => s), sign, bendAssembly, 3, clippedTemplates);
       var candB = templateAfter.HasValue
         ? new List<double> { templateAfter.Value }
-        : stations.Where(s => s >= endStation - StationTolerance).OrderBy(s => s).Take(3).ToList();
+        : TemplateCandidates(baseline, stations.Where(s => s >= endStation - StationTolerance).OrderBy(s => s), sign, bendAssembly, 3, clippedTemplates);
       if (candA.Count == 0 || candB.Count == 0)
-        throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", $"No applied station before {startStation:0.###} or after {endStation:0.###} to read the leg sections from.");
+        throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT",
+          $"No applied section before {startStation:0.###} or after {endStation:0.###} carries the bend region's assembly on the {side} side. " +
+          "Rebuild the corridor, or pass templateStationBefore / templateStationAfter.");
 
       var search = SearchValley(civilDoc, transaction, baseline, stations, side, candA, candB, linkCode, extension, step, surfaceName,
         geometry => RegionAtStation(baseline, geometry.PiStation));
@@ -167,6 +173,8 @@ public static partial class CorridorBowtieCommands
       var warnings = new List<string>(g.Warnings);
       warnings.AddRange(verdict.Warnings);
       warnings.AddRange(search.Notes);
+      if (clippedTemplates.Contains(g.SA) || clippedTemplates.Contains(g.SB))
+        warnings.Add($"A leg template comes from a section the clip already cuts ({(clippedTemplates.Contains(g.SA) ? g.SA : g.SB):0.###}): its template stops at the clip and was extended along its last slope. Check the valley.");
 
       if (verdict.Blocking.Count > 0)
       {
@@ -1228,20 +1236,22 @@ public static partial class CorridorBowtieCommands
     // the bend the first sections the clip does not touch; SearchValley tries further ones if the nearest give no usable valley
     var stationsBefore = stations.Where(s => s < Math.Min(piGuess, turnStart) - 0.05).OrderByDescending(s => s);
     var stationsAfter = stations.Where(s => s > Math.Max(piGuess, turnEnd) + 0.05).OrderBy(s => s);
-    var candA = UnclippedStations(baseline, stationsBefore, sign, 3);
-    var candB = UnclippedStations(baseline, stationsAfter, sign, 3);
+    var regionAssembly = SafeAssemblyId(region);
+    var clippedTemplates = new HashSet<double>();
+    var candA = TemplateCandidates(baseline, stationsBefore, sign, regionAssembly, 3, clippedTemplates);
+    var candB = TemplateCandidates(baseline, stationsAfter, sign, regionAssembly, 3, clippedTemplates);
     var recordedTemplates = desc.TryGetValue("templates", out var rt) ? ParseStationList(rt) : new List<double>();
     if (recordedTemplates.Count == 2)
     {
       var ra = stations.Where(s => Math.Abs(s - recordedTemplates[0]) < 0.001).Cast<double?>().FirstOrDefault();
       var rb = stations.Where(s => Math.Abs(s - recordedTemplates[1]) < 0.001).Cast<double?>().FirstOrDefault();
-      if (ra.HasValue && ra.Value < piGuess && UnclippedStations(baseline, new[] { ra.Value }, sign, 1).Count == 1)
+      if (ra.HasValue && ra.Value < piGuess && TemplateCandidates(baseline, new[] { ra.Value }, sign, regionAssembly, 1, clippedTemplates).Count == 1)
       { candA.RemoveAll(x => Math.Abs(x - ra.Value) < 0.001); candA.Insert(0, ra.Value); }
-      if (rb.HasValue && rb.Value > piGuess && UnclippedStations(baseline, new[] { rb.Value }, sign, 1).Count == 1)
+      if (rb.HasValue && rb.Value > piGuess && TemplateCandidates(baseline, new[] { rb.Value }, sign, regionAssembly, 1, clippedTemplates).Count == 1)
       { candB.RemoveAll(x => Math.Abs(x - rb.Value) < 0.001); candB.Insert(0, rb.Value); }
     }
     if (candA.Count == 0 || candB.Count == 0)
-      return Refuse("no unclipped section found next to the bend to read the leg templates from");
+      return Refuse($"no section next to the bend carries region '{region.Name}'s assembly on the {side} side: rebuild the corridor, or widen the region so it holds a section either side of the clip");
 
     ValleyGeometry g;
     ValleyVerdict verdict;
@@ -1255,6 +1265,8 @@ public static partial class CorridorBowtieCommands
     }
     catch (JsonRpcDispatchException ex) { return Refuse(ex.Message); }
     row["templateStations"] = new[] { Math.Round(g.SA, 4), Math.Round(g.SB, 4) };
+    if (clippedTemplates.Contains(g.SA) || clippedTemplates.Contains(g.SB))
+      notes.Add($"A leg template comes from a section the clip already cuts ({(clippedTemplates.Contains(g.SA) ? g.SA : g.SB):0.###}): its template stops at the clip and was extended along its last slope. Check the valley.");
     notes.AddRange(g.Warnings);
     notes.AddRange(verdict.Warnings);
     row["bend"] = BendInfo(g);
@@ -1348,31 +1360,49 @@ public static partial class CorridorBowtieCommands
     return row;
   }
 
-  /// <summary>The first <paramref name="count"/> candidate stations whose section has no Valley point on the inside side.</summary>
-  private static List<double> UnclippedStations(Baseline baseline, IEnumerable<double> candidates, double sign, int count)
+  /// <summary>Candidate template stations walking out from the bend. Only sections built with the region's own assembly count
+  /// (a neighbouring region with another assembly describes a different design surface); unclipped ones first, then clipped
+  /// ones, whose template stops at the clip and is extended along its last slope.</summary>
+  private static List<double> TemplateCandidates(Baseline baseline, IEnumerable<double> stations, double sign, ObjectId? assembly,
+    int count, HashSet<double> clippedOut)
   {
-    var list = new List<double>();
+    var clean = new List<double>();
+    var clipped = new List<double>();
     var n = 0;
-    foreach (var s in candidates)
+    foreach (var s in stations)
     {
-      if (list.Count >= count || ++n > 400) break;
-      try
+      if (clean.Count >= count || ++n > 400) break;
+      if (assembly.HasValue)
       {
-        var applied = baseline.GetAppliedAssemblyAtStation(s);
-        var clipped = false;
-        var inside = false;
-        foreach (CalculatedPoint p in applied.Points)
-        {
-          var off = sign * p.StationOffsetElevationToBaseline.Y;
-          if (off <= 1e-6) continue;
-          inside = true;
-          if (HasCode(p.CorridorCodes, "Valley")) { clipped = true; break; }
-        }
-        if (inside && !clipped) list.Add(s);
+        var region = RegionAtStation(baseline, s);
+        var id = region == null ? null : SafeAssemblyId(region);
+        if (!id.HasValue || id.Value != assembly.Value) continue;
       }
-      catch { }
+      var state = InsideClipped(baseline, s, sign);
+      if (state == null) continue;
+      if (state == false) clean.Add(s);
+      else if (clipped.Count < count) { clipped.Add(s); clippedOut.Add(s); }
     }
-    return list;
+    return clean.Concat(clipped).Take(count).ToList();
+  }
+
+  /// <summary>null = no inside section at this station, true = the clip already cuts it (a Valley point), false = full section.</summary>
+  private static bool? InsideClipped(Baseline baseline, double s, double sign)
+  {
+    try
+    {
+      var applied = baseline.GetAppliedAssemblyAtStation(s);
+      var inside = false;
+      foreach (CalculatedPoint p in applied.Points)
+      {
+        var off = sign * p.StationOffsetElevationToBaseline.Y;
+        if (off <= 1e-6) continue;
+        inside = true;
+        if (HasCode(p.CorridorCodes, "Valley")) return true;
+      }
+      return inside ? false : (bool?)null;
+    }
+    catch { return null; }
   }
 
   /// <summary>The valley up to 0.5 m past where it meets the ground: the part the sections can reach.</summary>
