@@ -109,6 +109,9 @@ public static partial class CorridorBowtieCommands
     /// <summary>Curved bends: how the inside sections sit against the curve's centre of curvature.</summary>
     public int CurveSections, CurveOvershooting;
     public double LocusFrom, LocusTo;
+    /// <summary>What it would take for the inside to daylight before the centre: the radius needed at this slope, and the
+    /// slope needed at this radius (run measured from the hinge, benches ignored, so the slope is the optimistic figure).</summary>
+    public double? RadiusNeeded, SlopeNeeded, CurveRadius;
     public double? CurveGapAtClip;
     public Dictionary<string, object?>? Lean;
     public readonly List<string> Warnings = new();
@@ -486,7 +489,21 @@ public static partial class CorridorBowtieCommands
       }
     }
 
-    if (g.BendType == "curve") CurveClosure(baseline, stations, g.LocusFrom > 0 ? g.LocusFrom : turnStart, g.LocusTo > 0 ? g.LocusTo : turnEnd, sign, g);
+    if (g.BendType == "curve")
+    {
+      CurveClosure(baseline, stations, g.LocusFrom > 0 ? g.LocusFrom : turnStart, g.LocusTo > 0 ? g.LocusTo : turnEnd, sign, g);
+      var rMid = RadiusAt(baseline, 0.5 * (turnStart + turnEnd), Math.Max(0.05, (turnEnd - turnStart) / 40.0));
+      g.CurveRadius = rMid;
+      var reach = Math.Max(legA.End - extension, legB.End - extension);
+      var rise = legA.Dz(reach);
+      var hinge = HingeOffset(legA) ?? legA.Start;
+      if (reach > 0) g.RadiusNeeded = Math.Round(reach + Math.Max(g.ClipInset, 0.05), 2);
+      if (rMid.HasValue && rise.HasValue)
+      {
+        var run = rMid.Value - g.ClipInset - hinge;
+        if (run > 0.5) g.SlopeNeeded = Math.Round(Math.Abs(rise.Value) / run, 3);
+      }
+    }
 
     // ---- expected lean off the bisector at the meet (plane model, angle point): u = t sin(D/2)(gA+gB) / (2 k sin(D/2) - cos(D/2)(gB-gA)),
     // k = the daylight slope there. The grade-break term dominating means the valley swings with small changes: a design question.
@@ -761,7 +778,11 @@ public static partial class CorridorBowtieCommands
       if (g.CurveOvershooting >= g.CurveSections)
       {
         var gap = g.CurveGapAtClip.HasValue ? $" and the clip leaves it {Math.Abs(g.CurveGapAtClip.Value):0.##} m {(g.CurveGapAtClip.Value < 0 ? "below" : "above")} the ground there" : "";
-        v.Blocking.Add($"not one of the {g.CurveSections} sections inside the curve reaches the ground before the centre of curvature{gap}: the inside of this curve cannot daylight at this radius and slope, so clipping it would only hide the crossings");
+        var fix = g.RadiusNeeded.HasValue || g.SlopeNeeded.HasValue
+          ? $" To daylight inside the curve it needs{(g.RadiusNeeded.HasValue ? $" a radius of about {g.RadiusNeeded:0.#} m at this slope" : "")}" +
+            $"{(g.RadiusNeeded.HasValue && g.SlopeNeeded.HasValue ? ", or" : "")}{(g.SlopeNeeded.HasValue ? $" a slope of about 1:{(1.0 / g.SlopeNeeded.Value):0.#} at this radius" : "")}."
+          : "";
+        v.Blocking.Add($"not one of the {g.CurveSections} sections inside the curve reaches the ground before the centre of curvature{gap}: the inside of this curve cannot daylight at this radius and slope, so clipping it would only hide the crossings.{fix}");
       }
       else if (g.CurveOvershooting > 0)
         v.Warnings.Add($"{g.CurveOvershooting} of the {g.CurveSections} sections inside the curve reach past the centre of curvature and are clipped there; the rest daylight normally.");
@@ -971,6 +992,13 @@ public static partial class CorridorBowtieCommands
       ["designMinusGroundAtClip"] = g.CurveGapAtClip,
       ["clipFrom"] = Math.Round(g.LocusFrom, 3),
       ["clipTo"] = Math.Round(g.LocusTo, 3),
+      ["radius"] = g.CurveRadius.HasValue ? Math.Round(g.CurveRadius.Value, 3) : null,
+      ["toDaylightInside"] = g.RadiusNeeded == null && g.SlopeNeeded == null ? null : new Dictionary<string, object?>
+      {
+        ["radiusAtThisSlope"] = g.RadiusNeeded,
+        ["slopeAtThisRadius"] = g.SlopeNeeded,
+        ["note"] = "the slope is rise over the run from the hinge to the clip, benches ignored, so it is the optimistic figure",
+      },
     },
     ["blocking"] = v.Blocking,
   };
