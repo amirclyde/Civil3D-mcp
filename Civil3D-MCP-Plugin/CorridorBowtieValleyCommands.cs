@@ -103,8 +103,12 @@ public static partial class CorridorBowtieCommands
     public double MaxSideways, LevelStep;
     public readonly List<string> MismatchReasons = new();
     public string? SurfaceUsed;
+    public CivilSurface? Surface;
     public (double X, double Y, double Z)? Hit;
     public double? MeetA, MeetB, MeetOffA, MeetOffB;
+    /// <summary>Curved bends: how the inside sections sit against the curve's centre of curvature.</summary>
+    public int CurveSections, CurveOvershooting;
+    public double? CurveGapAtClip;
     public Dictionary<string, object?>? Lean;
     public readonly List<string> Warnings = new();
   }
@@ -455,6 +459,7 @@ public static partial class CorridorBowtieCommands
     if (!string.IsNullOrWhiteSpace(surfaceName)) (surface, surfaceUsed) = FindSurface(civilDoc, transaction, surfaceName!);
     else (surface, surfaceUsed) = SurfaceFromTargets(baseline, transaction, piStation);
     g.SurfaceUsed = surfaceUsed;
+    g.Surface = surface;
     if (surface == null)
     {
       warnings.Add("No daylight surface (pass surfaceName, or map a surface target in the region): the point where the valley meets the ground was not computed.");
@@ -473,6 +478,8 @@ public static partial class CorridorBowtieCommands
         g.MeetOffB = legB.SO(hx, hy).O;
       }
     }
+
+    if (g.BendType == "curve") CurveClosure(baseline, stations, turnStart, turnEnd, sign, g);
 
     // ---- expected lean off the bisector at the meet (plane model, angle point): u = t sin(D/2)(gA+gB) / (2 k sin(D/2) - cos(D/2)(gB-gA)),
     // k = the daylight slope there. The grade-break term dominating means the valley swings with small changes: a design question.
@@ -621,6 +628,51 @@ public static partial class CorridorBowtieCommands
     return points;
   }
 
+  /// <summary>For each built section inside the curve: does its inside edge reach the ground before the centre of curvature?
+  /// Fills CurveSections / CurveOvershooting and, where it overshoots, how far the design sits from the ground at the clip.</summary>
+  private static void CurveClosure(Baseline baseline, double[] stations, double from, double to, double sign, ValleyGeometry g)
+  {
+    var h = Math.Max(0.05, (to - from) / 40.0);
+    double? worst = null;
+    foreach (var s in stations)
+    {
+      if (s < from - 1e-6 || s > to + 1e-6) continue;
+      var r = RadiusAt(baseline, s, h);
+      if (!r.HasValue || r.Value > 10000) continue;
+      AppliedAssembly applied;
+      try { applied = baseline.GetAppliedAssemblyAtStation(s); }
+      catch { continue; }
+      var outer = double.NaN;
+      foreach (CalculatedPoint p in applied.Points)
+      {
+        var off = sign * p.StationOffsetElevationToBaseline.Y;
+        if (off <= 1e-6) continue;
+        if (double.IsNaN(outer) || off > outer) outer = off;
+      }
+      if (double.IsNaN(outer)) continue;
+      g.CurveSections++;
+      if (outer <= r.Value - g.ClipInset) continue;
+      g.CurveOvershooting++;
+      // how far the design surface sits from the ground at the clip offset, along this section
+      var clipOff = r.Value - g.ClipInset;
+      var dz = g.LegA.Dz(clipOff);
+      if (!dz.HasValue) continue;
+      try
+      {
+        var clipPoint = baseline.StationOffsetElevationToXYZ(new Point3d(s, sign * clipOff, 0.0));
+        var z0 = BaselineElevation(applied);
+        if (!z0.HasValue) continue;
+        var design = z0.Value + dz.Value;
+        var ground = g.Surface?.FindElevationAtXY(clipPoint.X, clipPoint.Y);
+        if (!ground.HasValue) continue;
+        var gap = design - ground.Value;
+        if (!worst.HasValue || Math.Abs(gap) > Math.Abs(worst.Value)) worst = gap;
+      }
+      catch { }
+    }
+    g.CurveGapAtClip = worst.HasValue ? Math.Round(worst.Value, 3) : null;
+  }
+
   /// <summary>Checks that decide whether the valley may be built: same section, meet stations straddle the bend and lie inside the
   /// bend's region; plus a warning for sections that cross the valley more than once.</summary>
   private static ValleyVerdict CheckValley(ValleyGeometry g, Baseline baseline, double[] stations, BaselineRegion? region)
@@ -656,6 +708,18 @@ public static partial class CorridorBowtieCommands
     }
     else if (g.SurfaceUsed == null) v.Warnings.Add("No daylight surface: the straddle and region checks were skipped.");
 
+    // ---- a curve only closes where a section reaches the ground before the centre of curvature
+    if (g.BendType == "curve" && g.CurveSections > 0)
+    {
+      if (g.CurveOvershooting >= g.CurveSections)
+      {
+        var gap = g.CurveGapAtClip.HasValue ? $" and the clip leaves it {Math.Abs(g.CurveGapAtClip.Value):0.##} m {(g.CurveGapAtClip.Value < 0 ? "below" : "above")} the ground there" : "";
+        v.Blocking.Add($"not one of the {g.CurveSections} sections inside the curve reaches the ground before the centre of curvature{gap}: the inside of this curve cannot daylight at this radius and slope, so clipping it would only hide the crossings");
+      }
+      else if (g.CurveOvershooting > 0)
+        v.Warnings.Add($"{g.CurveOvershooting} of the {g.CurveSections} sections inside the curve reach past the centre of curvature and are clipped there; the rest daylight normally.");
+    }
+
     // ---- sections that cross the valley more than once (the clip stops at the first crossing), or reach it before the meet
     var sign = g.Side == "left" ? -1.0 : 1.0;
     var o0 = Math.Min(g.LegA.Start, g.LegB.Start);
@@ -677,6 +741,13 @@ public static partial class CorridorBowtieCommands
       }
       catch { continue; }
       var offs = SectionValleyCrossings(p0.X, p0.Y, p1.X, p1.Y, g.ClipPoly).Select(l => o0 + l * (o1 - o0)).ToList();
+      // on a curve the section crosses the locus at R - inset and the valley at the centre itself: one clip, not two
+      if (g.BendType == "curve" && g.ClipInset > 0)
+      {
+        var merged = new List<double>();
+        foreach (var o in offs) if (merged.Count == 0 || o - merged[^1] > 1.5 * g.ClipInset) merged.Add(o);
+        offs = merged;
+      }
       var multi = offs.Count > 1;
       var early = meetOff.HasValue && offs.Count > 0 && offs[0] < meetOff.Value - 0.05;
       if (!multi && !early) continue;
@@ -845,6 +916,13 @@ public static partial class CorridorBowtieCommands
     },
     ["suggestedRegionRange"] = v.SuggestedRange,
     ["multipleCrossings"] = v.Crossings,
+    ["curve"] = g.BendType != "curve" ? null : new Dictionary<string, object?>
+    {
+      ["sectionsInside"] = g.CurveSections,
+      ["overshootingCentre"] = g.CurveOvershooting,
+      ["clipInset"] = Math.Round(g.ClipInset, 4),
+      ["designMinusGroundAtClip"] = g.CurveGapAtClip,
+    },
     ["blocking"] = v.Blocking,
   };
 
