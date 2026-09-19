@@ -108,7 +108,7 @@ public static partial class CorridorBowtieCommands
   {
     public readonly List<string> Blocking = new();
     public bool Straddles = true;
-    public bool InsideRegion = true;
+    public bool? InsideRegion;
     public double[]? SuggestedRange;
     public readonly List<Dictionary<string, object?>> Crossings = new();
     public readonly List<string> Warnings = new();
@@ -148,17 +148,25 @@ public static partial class CorridorBowtieCommands
       var baseline = GetBaseline(corridor, baselineIndex);
       var stations = AppliedStationsOrThrow(corridor, baseline);
 
-      // ---- template stations: last applied station at/before the bowtie, first at/after it
-      var sA = templateBefore ?? stations.Where(s => s <= startStation + StationTolerance).DefaultIfEmpty(double.NaN).Max();
-      var sB = templateAfter ?? stations.Where(s => s >= endStation - StationTolerance).DefaultIfEmpty(double.NaN).Min();
-      if (double.IsNaN(sA) || double.IsNaN(sB))
+      // ---- template stations: the last applied stations at/before the bowtie and the first at/after it (the nearest pair
+      // first, then up to two more on each side if the nearest one gives no usable valley)
+      var candA = templateBefore.HasValue
+        ? new List<double> { templateBefore.Value }
+        : stations.Where(s => s <= startStation + StationTolerance).OrderByDescending(s => s).Take(3).ToList();
+      var candB = templateAfter.HasValue
+        ? new List<double> { templateAfter.Value }
+        : stations.Where(s => s >= endStation - StationTolerance).OrderBy(s => s).Take(3).ToList();
+      if (candA.Count == 0 || candB.Count == 0)
         throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", $"No applied station before {startStation:0.###} or after {endStation:0.###} to read the leg sections from.");
 
-      var g = ComputeValley(civilDoc, transaction, baseline, stations, side, sA, sB, linkCode, extension, step, surfaceName);
-      var region = RegionAtStation(baseline, g.PiStation);
-      var verdict = CheckValley(g, baseline, stations, region);
+      var search = SearchValley(civilDoc, transaction, baseline, stations, side, candA, candB, linkCode, extension, step, surfaceName,
+        geometry => RegionAtStation(baseline, geometry.PiStation));
+      var g = search.G;
+      var region = search.Region;
+      var verdict = search.Verdict;
       var warnings = new List<string>(g.Warnings);
       warnings.AddRange(verdict.Warnings);
+      warnings.AddRange(search.Notes);
 
       if (verdict.Blocking.Count > 0)
       {
@@ -226,6 +234,7 @@ public static partial class CorridorBowtieCommands
         ["dryRun"] = dryRun,
         ["bend"] = BendInfo(g),
         ["legs"] = new[] { LegInfo(g.LegA, "incoming"), LegInfo(g.LegB, "outgoing") },
+        ["templateSearch"] = search.Tried,
         ["valley"] = ValleyInfo(g, name),
         ["meetsDaylight"] = MeetInfo(g),
         ["checks"] = ChecksInfo(g, verdict, region),
@@ -465,6 +474,61 @@ public static partial class CorridorBowtieCommands
     return g;
   }
 
+  private sealed class ValleySearch
+  {
+    public ValleyGeometry G = null!;
+    public ValleyVerdict Verdict = null!;
+    public BaselineRegion? Region;
+    public readonly List<Dictionary<string, object?>> Tried = new();
+    public readonly List<string> Notes = new();
+  }
+
+  /// <summary>Valley from the nearest pair of template stations; when that pair gives no usable valley (an error, or a blocking
+  /// check), the next pairs outward (by total steps) until one passes. Returns the passing pair, else the nearest one that computed.</summary>
+  private static ValleySearch SearchValley(CivilDocument civilDoc, Transaction transaction, Baseline baseline, double[] stations, string side,
+    List<double> candA, List<double> candB, string linkCode, double extension, double step, string? surfaceName,
+    Func<ValleyGeometry, BaselineRegion?> regionOf)
+  {
+    var result = new ValleySearch();
+    var pairs = new List<(int I, int J)>();
+    for (var i = 0; i < candA.Count; i++)
+      for (var j = 0; j < candB.Count; j++) pairs.Add((i, j));
+    pairs = pairs.OrderBy(p => p.I + p.J).ThenBy(p => p.I).ToList();
+    (ValleyGeometry G, ValleyVerdict V, BaselineRegion? R)? first = null;
+    JsonRpcDispatchException? firstError = null;
+    foreach (var (i, j) in pairs)
+    {
+      var row = new Dictionary<string, object?> { ["incoming"] = Math.Round(candA[i], 4), ["outgoing"] = Math.Round(candB[j], 4) };
+      result.Tried.Add(row);
+      ValleyGeometry g;
+      try { g = ComputeValley(civilDoc, transaction, baseline, stations, side, candA[i], candB[j], linkCode, extension, step, surfaceName); }
+      catch (JsonRpcDispatchException ex)
+      {
+        row["result"] = ex.Message;
+        firstError ??= ex;
+        // wrong side / parallel legs do not depend on the template stations: stop searching
+        if (ex.Message.Contains("outside of this bend") || ex.Message.Contains("are parallel")) throw;
+        continue;
+      }
+      var region = regionOf(g);
+      var verdict = CheckValley(g, baseline, stations, region);
+      first ??= (g, verdict, region);
+      if (verdict.Blocking.Count == 0)
+      {
+        row["result"] = "ok";
+        result.G = g; result.Verdict = verdict; result.Region = region;
+        if (i != 0 || j != 0)
+          result.Notes.Add($"The nearest sections ({candA[0]:0.###} / {candB[0]:0.###}) gave no usable valley; used {candA[i]:0.###} / {candB[j]:0.###}. " +
+                           "Check the result (templateSearch lists why the nearer pairs failed).");
+        return result;
+      }
+      row["result"] = string.Join("; ", verdict.Blocking);
+    }
+    if (first == null) throw firstError ?? new JsonRpcDispatchException("CIVIL3D.INVALID_STATE", "No template stations to build the valley from.");
+    result.G = first.Value.G; result.Verdict = first.Value.V; result.Region = first.Value.R;
+    return result;
+  }
+
   /// <summary>Checks that decide whether the valley may be built: same section, meet stations straddle the bend and lie inside the
   /// bend's region; plus a warning for sections that cross the valley more than once.</summary>
   private static ValleyVerdict CheckValley(ValleyGeometry g, Baseline baseline, double[] stations, BaselineRegion? region)
@@ -477,6 +541,8 @@ public static partial class CorridorBowtieCommands
       v.InsideRegion = false;
       v.Blocking.Add($"the bend ({g.PiStation:0.###}) is on a region boundary: isolate it into one region first");
     }
+    if (g.SurfaceUsed != null && !g.Hit.HasValue)
+      v.Blocking.Add($"the valley does not reach surface '{g.SurfaceUsed}' within the two leg sections (+ extension): the sections do not describe the same design surface near the ground (e.g. one benched, one not)");
     if (g.MeetA.HasValue && g.MeetB.HasValue)
     {
       var a = g.MeetA.Value;
@@ -488,6 +554,7 @@ public static partial class CorridorBowtieCommands
         v.Straddles = false;
         v.Blocking.Add($"the valley meets the ground at stations {a:0.###} (incoming) / {b:0.###} (outgoing), which do not straddle the bend at {g.PiStation:0.###}: it runs to the wrong side");
       }
+      if (region != null && v.Straddles) v.InsideRegion = true;
       if (region != null && v.Straddles && (a <= region.StartStation + RegionMargin || b >= region.EndStation - RegionMargin))
       {
         v.InsideRegion = false;
@@ -495,7 +562,7 @@ public static partial class CorridorBowtieCommands
         v.Blocking.Add($"the meet stations {a:0.###} / {b:0.###} are not inside region '{region.Name}' ({region.StartStation:0.###}-{region.EndStation:0.###}), so part of the loop would stay unclipped");
       }
     }
-    else v.Warnings.Add("The valley does not meet the ground: the straddle and region checks were skipped.");
+    else if (g.SurfaceUsed == null) v.Warnings.Add("No daylight surface: the straddle and region checks were skipped.");
 
     // ---- sections that cross the valley more than once (the clip stops at the first crossing), or reach it before the meet
     var sign = g.Side == "left" ? -1.0 : 1.0;
@@ -601,7 +668,7 @@ public static partial class CorridorBowtieCommands
     var inv = System.Globalization.CultureInfo.InvariantCulture;
     var added = string.Join("|", addedStations.Select(s => s.ToString("0.####", inv)));
     return $"{ValleyDescriptionTag}; corridor={corridorName.Replace(";", ",")}; baseline={baselineIndex}; side={g.Side}; " +
-           $"pi={g.PiStation.ToString("0.####", inv)}; stations={added}";
+           $"pi={g.PiStation.ToString("0.####", inv)}; templates={g.SA.ToString("0.####", inv)}|{g.SB.ToString("0.####", inv)}; stations={added}";
   }
 
   private static Dictionary<string, string> ParseValleyDescription(string? description)
@@ -1157,18 +1224,38 @@ public static partial class CorridorBowtieCommands
     row["side"] = side;
     var sign = side == "left" ? -1.0 : 1.0;
 
-    // ---- template stations: walking out from the bend, the first sections the clip does not touch
-    var sA = FirstUnclipped(baseline, stations.Where(s => s < Math.Min(piGuess, turnStart) - 0.05).OrderByDescending(s => s), sign);
-    var sB = FirstUnclipped(baseline, stations.Where(s => s > Math.Max(piGuess, turnEnd) + 0.05).OrderBy(s => s), sign);
-    if (!sA.HasValue || !sB.HasValue)
+    // ---- template stations: the ones the valley was built from (if recorded and still unclipped), then walking out from
+    // the bend the first sections the clip does not touch; SearchValley tries further ones if the nearest give no usable valley
+    var stationsBefore = stations.Where(s => s < Math.Min(piGuess, turnStart) - 0.05).OrderByDescending(s => s);
+    var stationsAfter = stations.Where(s => s > Math.Max(piGuess, turnEnd) + 0.05).OrderBy(s => s);
+    var candA = UnclippedStations(baseline, stationsBefore, sign, 3);
+    var candB = UnclippedStations(baseline, stationsAfter, sign, 3);
+    var recordedTemplates = desc.TryGetValue("templates", out var rt) ? ParseStationList(rt) : new List<double>();
+    if (recordedTemplates.Count == 2)
+    {
+      var ra = stations.Where(s => Math.Abs(s - recordedTemplates[0]) < 0.001).Cast<double?>().FirstOrDefault();
+      var rb = stations.Where(s => Math.Abs(s - recordedTemplates[1]) < 0.001).Cast<double?>().FirstOrDefault();
+      if (ra.HasValue && ra.Value < piGuess && UnclippedStations(baseline, new[] { ra.Value }, sign, 1).Count == 1)
+      { candA.RemoveAll(x => Math.Abs(x - ra.Value) < 0.001); candA.Insert(0, ra.Value); }
+      if (rb.HasValue && rb.Value > piGuess && UnclippedStations(baseline, new[] { rb.Value }, sign, 1).Count == 1)
+      { candB.RemoveAll(x => Math.Abs(x - rb.Value) < 0.001); candB.Insert(0, rb.Value); }
+    }
+    if (candA.Count == 0 || candB.Count == 0)
       return Refuse("no unclipped section found next to the bend to read the leg templates from");
-    row["templateStations"] = new[] { Math.Round(sA.Value, 4), Math.Round(sB.Value, 4) };
 
     ValleyGeometry g;
-    try { g = ComputeValley(civilDoc, transaction, baseline, stations, side, sA.Value, sB.Value, linkCode, extension, step, surfaceName); }
+    ValleyVerdict verdict;
+    try
+    {
+      var search = SearchValley(civilDoc, transaction, baseline, stations, side, candA, candB, linkCode, extension, step, surfaceName, _ => region);
+      g = search.G;
+      verdict = search.Verdict;
+      notes.AddRange(search.Notes);
+      row["templateSearch"] = search.Tried;
+    }
     catch (JsonRpcDispatchException ex) { return Refuse(ex.Message); }
+    row["templateStations"] = new[] { Math.Round(g.SA, 4), Math.Round(g.SB, 4) };
     notes.AddRange(g.Warnings);
-    var verdict = CheckValley(g, baseline, stations, region);
     notes.AddRange(verdict.Warnings);
     row["bend"] = BendInfo(g);
     row["checks"] = ChecksInfo(g, verdict, region);
@@ -1176,7 +1263,7 @@ public static partial class CorridorBowtieCommands
     row["lean"] = g.Lean;
 
     // ---- compare with what is there
-    var shift = ValleyShift(valley, g.Poly);
+    var shift = ValleyShift(valley, UsedPart(g));
     row["maxShift"] = shift.HasValue ? Math.Round(shift.Value, 4) : null;
     row["oldLength"] = Math.Round(valley.Length, 4);
     row["newLength"] = Math.Round(PolylineLength(g.Poly), 4);
@@ -1261,12 +1348,14 @@ public static partial class CorridorBowtieCommands
     return row;
   }
 
-  private static double? FirstUnclipped(Baseline baseline, IEnumerable<double> candidates, double sign)
+  /// <summary>The first <paramref name="count"/> candidate stations whose section has no Valley point on the inside side.</summary>
+  private static List<double> UnclippedStations(Baseline baseline, IEnumerable<double> candidates, double sign, int count)
   {
+    var list = new List<double>();
     var n = 0;
     foreach (var s in candidates)
     {
-      if (++n > 400) break;
+      if (list.Count >= count || ++n > 400) break;
       try
       {
         var applied = baseline.GetAppliedAssemblyAtStation(s);
@@ -1279,11 +1368,43 @@ public static partial class CorridorBowtieCommands
           inside = true;
           if (HasCode(p.CorridorCodes, "Valley")) { clipped = true; break; }
         }
-        if (inside && !clipped) return s;
+        if (inside && !clipped) list.Add(s);
       }
       catch { }
     }
-    return null;
+    return list;
+  }
+
+  /// <summary>The valley up to 0.5 m past where it meets the ground: the part the sections can reach.</summary>
+  private static List<(double X, double Y, double? Z, double T, double U, string Kind)> UsedPart(ValleyGeometry g)
+  {
+    if (!g.Hit.HasValue || g.Poly.Count < 2) return g.Poly;
+    var (hx, hy, _) = g.Hit.Value;
+    // arc length of the hit along the polyline
+    double run = 0, best = double.MaxValue, hitAt = 0;
+    for (var i = 1; i < g.Poly.Count; i++)
+    {
+      var ax = g.Poly[i - 1].X; var ay = g.Poly[i - 1].Y;
+      var ex = g.Poly[i].X - ax; var ey = g.Poly[i].Y - ay;
+      var len = Math.Sqrt(ex * ex + ey * ey);
+      var t = len < 1e-12 ? 0.0 : Math.Clamp(((hx - ax) * ex + (hy - ay) * ey) / (len * len), 0.0, 1.0);
+      var d = Math.Sqrt(Math.Pow(ax + ex * t - hx, 2) + Math.Pow(ay + ey * t - hy, 2));
+      if (d < best) { best = d; hitAt = run + t * len; }
+      run += len;
+    }
+    var limit = hitAt + 0.5;
+    var result = new List<(double X, double Y, double? Z, double T, double U, string Kind)> { g.Poly[0] };
+    run = 0;
+    for (var i = 1; i < g.Poly.Count; i++)
+    {
+      var a = g.Poly[i - 1]; var b = g.Poly[i];
+      var len = Math.Sqrt(Math.Pow(b.X - a.X, 2) + Math.Pow(b.Y - a.Y, 2));
+      if (run + len <= limit) { result.Add(b); run += len; continue; }
+      var f = len < 1e-12 ? 0.0 : (limit - run) / len;
+      result.Add((a.X + (b.X - a.X) * f, a.Y + (b.Y - a.Y) * f, null, a.T + (b.T - a.T) * f, a.U + (b.U - a.U) * f, "cut"));
+      break;
+    }
+    return result;
   }
 
   /// <summary>Largest distance between the existing valley alignment and the new polyline (both sampled at 0.1 m).</summary>
@@ -1310,9 +1431,10 @@ public static partial class CorridorBowtieCommands
         var m = Math.Max(1, (int)Math.Ceiling(Math.Sqrt((bx - ax) * (bx - ax) + (by - ay) * (by - ay)) / 0.1));
         for (var k = (i == 1 ? 0 : 1); k <= m; k++) newSamples.Add((ax + (bx - ax) * k / m, ay + (by - ay) * k / m));
       }
+      // the new valley's used part against the old line, and the old line's start (the PI end) against the new one
       var max = 0.0;
-      foreach (var p in oldPts) max = Math.Max(max, DistanceToPolyline(p, newPts));
       foreach (var p in newSamples) max = Math.Max(max, DistanceToPolyline(p, oldPts));
+      max = Math.Max(max, DistanceToPolyline(oldPts[0], newPts));
       return max;
     }
     catch { return null; }
