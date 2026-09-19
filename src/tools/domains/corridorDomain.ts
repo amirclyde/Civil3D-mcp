@@ -397,6 +397,7 @@ const CorridorBowtieValleyArgsSchema = z.object({
   layer: z.string().optional(),
   dryRun: z.boolean().optional(),
   allowMismatch: z.boolean().optional(),
+  clipInset: z.number().nonnegative().max(5).optional(),
 });
 
 const CorridorBowtieValleyPreviewArgsSchema = CorridorBowtieValleyArgsSchema.extend({
@@ -417,6 +418,7 @@ const CorridorBowtieRefreshArgsSchema = z.object({
   rebuild: z.boolean().optional(),
   rebuildFirst: z.boolean().optional(),
   allowMismatch: z.boolean().optional(),
+  clipInset: z.number().nonnegative().max(5).optional(),
 });
 
 const CorridorBowtieRefreshPreviewArgsSchema = CorridorBowtieRefreshArgsSchema.extend({
@@ -563,6 +565,7 @@ const canonicalCorridorInputShape = {
   tolerance: z.number().nonnegative().optional().describe("bowtie_check: crossings closer than this to a link end count as touching (default 0.005 m). bowtie_refresh: a valley that moved less than this stays as it is (default 0.01 m)."),
   allowMismatch: z.boolean().optional().describe("bowtie_valley / bowtie_refresh: build the valley even when a check fails (different inside sections, meet stations not straddling the bend or outside the region); default false = refuse."),
   rebuildFirst: z.boolean().optional().describe("bowtie_refresh: rebuild the corridor before reading its sections (default true; dry runs never rebuild)."),
+  clipInset: z.number().nonnegative().max(5).optional().describe("bowtie_valley / bowtie_refresh, curved bends only: how far short of the curve's centre of curvature the inside sections stop, in metres (default 2 % of the radius, clamped to 0.05-0.5 m)."),
   stations: z.array(z.number()).optional().describe("region_stations delete: added stations to remove."),
 };
 
@@ -602,6 +605,7 @@ function bowtieRefreshParams(args: CorridorRawArgs, dryRun: boolean) {
     rebuild: args.rebuild ?? true,
     rebuildFirst: dryRun ? false : (args.rebuildFirst ?? true),
     allowMismatch: args.allowMismatch ?? false,
+    clipInset: args.clipInset ?? null,
   };
 }
 
@@ -1148,6 +1152,7 @@ export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
           layer: args.layer ?? null,
           dryRun: args.dryRun ?? false,
           allowMismatch: args.allowMismatch ?? false,
+          clipInset: args.clipInset ?? null,
         }),
       ),
     },
@@ -1180,6 +1185,7 @@ export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
           layer: args.layer ?? null,
           dryRun: true,
           allowMismatch: args.allowMismatch ?? false,
+          clipInset: args.clipInset ?? null,
         }),
       ),
     },

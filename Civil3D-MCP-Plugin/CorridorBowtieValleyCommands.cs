@@ -95,6 +95,11 @@ public static partial class CorridorBowtieCommands
     public double TurnStart, TurnEnd, StartX, StartY, TStart;
     public List<(double T, double U)> Path = new();
     public List<(double X, double Y, double? Z, double T, double U, string Kind)> Poly = new();
+    /// <summary>What the clip alignment is drawn from. On an angle point this is Poly; on a curve it is Poly (outer end
+    /// first, in to the curve centre) followed by the locus of curvature centres pulled in by ClipInset.</summary>
+    public List<(double X, double Y, double? Z, double T, double U, string Kind)> ClipPoly = new();
+    public double ClipInset;
+    public int LocusPoints;
     public double MaxSideways, LevelStep;
     public readonly List<string> MismatchReasons = new();
     public string? SurfaceUsed;
@@ -134,7 +139,10 @@ public static partial class CorridorBowtieCommands
     var style = PluginRuntime.GetOptionalString(parameters, "style");
     var layer = PluginRuntime.GetOptionalString(parameters, "layer");
     var allowMismatch = PluginRuntime.GetOptionalBool(parameters, "allowMismatch") ?? false;
+    var clipInset = PluginRuntime.GetOptionalDouble(parameters, "clipInset") ?? 0.0;
 
+    if (clipInset < 0 || clipInset > 5)
+      throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "clipInset must be between 0 (automatic) and 5 m: it is how far short of the curve's centre of curvature the inside sections stop.");
     if (side is not ("left" or "right"))
       throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "side must be left or right: the inside of the bend (bowtie_predict reports it).");
     if (!(endStation > startStation))
@@ -165,7 +173,7 @@ public static partial class CorridorBowtieCommands
           $"No applied section before {startStation:0.###} or after {endStation:0.###} carries the bend region's assembly on the {side} side. " +
           "Rebuild the corridor, or pass templateStationBefore / templateStationAfter.");
 
-      var search = SearchValley(civilDoc, transaction, baseline, stations, side, candA, candB, linkCode, extension, step, surfaceName,
+      var search = SearchValley(civilDoc, transaction, baseline, stations, side, candA, candB, linkCode, extension, step, surfaceName, clipInset,
         geometry => RegionAtStation(baseline, geometry.PiStation));
       var g = search.G;
       var region = search.Region;
@@ -222,7 +230,7 @@ public static partial class CorridorBowtieCommands
       }
       if (!dryRun && createAlignment)
       {
-        var alignmentId = CreateValleyAlignment(civilDoc, database, transaction, name, g.Poly, style, layer);
+        var alignmentId = CreateValleyAlignment(civilDoc, database, transaction, name, g.ClipPoly, style, layer);
         var alignment = CivilObjectUtils.GetRequiredObject<Alignment>(transaction, alignmentId, OpenMode.ForWrite);
         try { alignment.Description = ValleyDescription(corridor.Name, baselineIndex, g, addedList); }
         catch (Exception ex) { warnings.Add($"The alignment description (used by bowtie_refresh) could not be set: {ex.Message}"); }
@@ -268,7 +276,7 @@ public static partial class CorridorBowtieCommands
 
   /// <summary>Valley line of one bend from the unclipped sections at sA (incoming leg) and sB (outgoing leg). Read-only.</summary>
   private static ValleyGeometry ComputeValley(CivilDocument civilDoc, Transaction transaction, Baseline baseline, double[] stations,
-    string side, double sA, double sB, string linkCode, double extension, double step, string? surfaceName)
+    string side, double sA, double sB, string linkCode, double extension, double step, string? surfaceName, double clipInset)
   {
     var g = new ValleyGeometry { Side = side, SA = sA, SB = sB };
     var warnings = g.Warnings;
@@ -404,6 +412,25 @@ public static partial class CorridorBowtieCommands
       raw.Add((qx, qy, legA.Z(qx, qy), t, u, "exact"));
     }
     g.Poly = SimplifyPolyline(raw, 0.005);
+    g.ClipPoly = g.Poly;
+
+    // ---- a curved bend: the sections are normals to the baseline, so they all pass through the centre of curvature and
+    // only overlap beyond it. The clip line is the locus of those centres pulled in by ClipInset (a point per station at
+    // offset R(s) - inset), run on from the valley, which catches the sections in the tangents either side.
+    if (g.BendType == "curve")
+    {
+      var locus = CurvatureLocus(baseline, turnStart, turnEnd, sign, legA.Start, clipInset, out var inset);
+      g.ClipInset = inset;
+      g.LocusPoints = locus.Count;
+      if (locus.Count >= 2)
+      {
+        var composite = new List<(double X, double Y, double? Z, double T, double U, string Kind)>();
+        for (var i = g.Poly.Count - 1; i >= 0; i--) composite.Add(g.Poly[i]);
+        composite.AddRange(locus);
+        g.ClipPoly = composite;
+      }
+      else warnings.Add($"The curve's centre of curvature could not be traced between {turnStart:0.###} and {turnEnd:0.###}: the clip line is the valley alone, which only catches the sections either side of the curve.");
+    }
 
     // ---- do the two legs carry the same section? (a region boundary with a different drain / lane level at the
     // bend puts the valley far off the bisector and the construction is no longer reliable)
@@ -494,7 +521,7 @@ public static partial class CorridorBowtieCommands
   /// <summary>Valley from the nearest pair of template stations; when that pair gives no usable valley (an error, or a blocking
   /// check), the next pairs outward (by total steps) until one passes. Returns the passing pair, else the nearest one that computed.</summary>
   private static ValleySearch SearchValley(CivilDocument civilDoc, Transaction transaction, Baseline baseline, double[] stations, string side,
-    List<double> candA, List<double> candB, string linkCode, double extension, double step, string? surfaceName,
+    List<double> candA, List<double> candB, string linkCode, double extension, double step, string? surfaceName, double clipInset,
     Func<ValleyGeometry, BaselineRegion?> regionOf)
   {
     var result = new ValleySearch();
@@ -509,7 +536,7 @@ public static partial class CorridorBowtieCommands
       var row = new Dictionary<string, object?> { ["incoming"] = Math.Round(candA[i], 4), ["outgoing"] = Math.Round(candB[j], 4) };
       result.Tried.Add(row);
       ValleyGeometry g;
-      try { g = ComputeValley(civilDoc, transaction, baseline, stations, side, candA[i], candB[j], linkCode, extension, step, surfaceName); }
+      try { g = ComputeValley(civilDoc, transaction, baseline, stations, side, candA[i], candB[j], linkCode, extension, step, surfaceName, clipInset); }
       catch (JsonRpcDispatchException ex)
       {
         row["result"] = ex.Message;
@@ -535,6 +562,63 @@ public static partial class CorridorBowtieCommands
     if (first == null) throw firstError ?? new JsonRpcDispatchException("CIVIL3D.INVALID_STATE", "No template stations to build the valley from.");
     result.G = first.Value.G; result.Verdict = first.Value.V; result.Region = first.Value.R;
     return result;
+  }
+
+  /// <summary>Radius of curvature at a station from the direction change either side of it; null where the baseline is straight.</summary>
+  private static double? RadiusAt(Baseline baseline, double s, double h)
+  {
+    try
+    {
+      var a = baseline.GetDirectionAtStation(s - h);
+      var b = baseline.GetDirectionAtStation(s + h);
+      var t1 = Math.Atan2(a.Y, a.X);
+      var t2 = Math.Atan2(b.Y, b.X);
+      var d = t2 - t1;
+      while (d > Math.PI) d -= 2 * Math.PI;
+      while (d < -Math.PI) d += 2 * Math.PI;
+      var k = Math.Abs(d) / (2 * h);
+      return k < 1e-6 ? null : 1.0 / k;
+    }
+    catch { return null; }
+  }
+
+  /// <summary>The clip line inside a curve: per station the point at offset R(s) - inset, i.e. the centre of curvature pulled
+  /// back towards the road. On a constant radius this traces a small arc around the centre; through a spiral it follows the
+  /// centre as it moves. The inset is 2 % of the radius, clamped to 0.05-0.5 m, unless one was given.</summary>
+  private static List<(double X, double Y, double? Z, double T, double U, string Kind)> CurvatureLocus(
+    Baseline baseline, double from, double to, double sign, double insideStart, double requested, out double insetUsed)
+  {
+    var points = new List<(double X, double Y, double? Z, double T, double U, string Kind)>();
+    insetUsed = requested;
+    var span = to - from;
+    if (span <= 1e-6) return points;
+    var n = Math.Clamp((int)Math.Ceiling(span / 0.25), 4, 400);
+    var h = Math.Max(0.05, span / (4.0 * n));
+    var insets = new List<double>();
+    var raw = new List<(double X, double Y, double R, double S)>();
+    for (var i = 0; i <= n; i++)
+    {
+      var s = from + span * i / n;
+      var r = RadiusAt(baseline, s, h);
+      if (!r.HasValue || r.Value > 10000) continue;
+      var inset = requested > 0 ? requested : Math.Clamp(0.02 * r.Value, 0.05, 0.5);
+      var off = r.Value - inset;
+      if (off <= insideStart) continue;   // the centre falls inside the road itself: nothing to clip
+      Point3d p;
+      try { p = baseline.StationOffsetElevationToXYZ(new Point3d(s, sign * off, 0.0)); }
+      catch { continue; }
+      raw.Add((p.X, p.Y, r.Value, s));
+      insets.Add(inset);
+    }
+    if (raw.Count < 2) return points;
+    insetUsed = insets.Average();
+    // drop points closer together than 20 mm: a tight radius traces a very small arc
+    var kept = new List<(double X, double Y, double R, double S)> { raw[0] };
+    foreach (var q in raw.Skip(1))
+      if (Math.Sqrt(Math.Pow(q.X - kept[^1].X, 2) + Math.Pow(q.Y - kept[^1].Y, 2)) >= 0.02) kept.Add(q);
+    if (kept.Count < 2) { kept.Clear(); kept.Add(raw[0]); kept.Add(raw[^1]); }
+    foreach (var q in kept) points.Add((q.X, q.Y, null, q.S, q.R, "locus"));
+    return points;
   }
 
   /// <summary>Checks that decide whether the valley may be built: same section, meet stations straddle the bend and lie inside the
@@ -592,7 +676,7 @@ public static partial class CorridorBowtieCommands
         p1 = baseline.StationOffsetElevationToXYZ(new Point3d(s, sign * o1, 0.0));
       }
       catch { continue; }
-      var offs = SectionValleyCrossings(p0.X, p0.Y, p1.X, p1.Y, g.Poly).Select(l => o0 + l * (o1 - o0)).ToList();
+      var offs = SectionValleyCrossings(p0.X, p0.Y, p1.X, p1.Y, g.ClipPoly).Select(l => o0 + l * (o1 - o0)).ToList();
       var multi = offs.Count > 1;
       var early = meetOff.HasValue && offs.Count > 0 && offs[0] < meetOff.Value - 0.05;
       if (!multi && !early) continue;
@@ -675,8 +759,9 @@ public static partial class CorridorBowtieCommands
   {
     var inv = System.Globalization.CultureInfo.InvariantCulture;
     var added = string.Join("|", addedStations.Select(s => s.ToString("0.####", inv)));
+    var inset = g.ClipInset > 0 ? $"; inset={g.ClipInset.ToString("0.####", inv)}" : "";
     return $"{ValleyDescriptionTag}; corridor={corridorName.Replace(";", ",")}; baseline={baselineIndex}; side={g.Side}; " +
-           $"pi={g.PiStation.ToString("0.####", inv)}; templates={g.SA.ToString("0.####", inv)}|{g.SB.ToString("0.####", inv)}; stations={added}";
+           $"bend={g.BendType}; pi={g.PiStation.ToString("0.####", inv)}; templates={g.SA.ToString("0.####", inv)}|{g.SB.ToString("0.####", inv)}{inset}; stations={added}";
   }
 
   private static Dictionary<string, string> ParseValleyDescription(string? description)
@@ -720,7 +805,9 @@ public static partial class CorridorBowtieCommands
     ["lean"] = g.Lean,
     ["templatesMatch"] = g.MismatchReasons.Count == 0,
     ["levelStepAtPi"] = Math.Round(g.LevelStep, 4),
-    ["length"] = Math.Round(PolylineLength(g.Poly), 4),
+    ["length"] = Math.Round(PolylineLength(g.ClipPoly), 4),
+    ["clipInset"] = g.ClipInset > 0 ? Math.Round(g.ClipInset, 4) : null,
+    ["locusPoints"] = g.LocusPoints,
     ["points"] = g.Poly.Select(p => new Dictionary<string, object?>
     {
       ["x"] = Math.Round(p.X, 4), ["y"] = Math.Round(p.Y, 4),
@@ -1114,6 +1201,7 @@ public static partial class CorridorBowtieCommands
     var rebuild = PluginRuntime.GetOptionalBool(parameters, "rebuild") ?? true;
     var rebuildFirst = PluginRuntime.GetOptionalBool(parameters, "rebuildFirst") ?? true;
     var allowMismatch = PluginRuntime.GetOptionalBool(parameters, "allowMismatch") ?? false;
+    var clipInset = PluginRuntime.GetOptionalDouble(parameters, "clipInset") ?? 0.0;
     if (extension < 0 || step <= 0 || step > 1 || tolerance <= 0)
       throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "extension must be >= 0, step in (0, 1] and tolerance > 0.");
 
@@ -1159,7 +1247,7 @@ public static partial class CorridorBowtieCommands
             if (id.IsNull || !seen.Add(id)) continue;
             if (transaction.GetObject(id, OpenMode.ForRead) is not Alignment valley) continue;
             var row = RefreshValley(civilDoc, transaction, corridor, baselineIndex, baseline, stations, region, ri, info.SubassemblyName, valley,
-              linkCode, extension, step, surfaceName, tolerance, dryRun, allowMismatch);
+              linkCode, extension, step, surfaceName, tolerance, dryRun, allowMismatch, clipInset);
             if (row["applied"] is true) changed = true;
             results.Add(row);
           }
@@ -1192,7 +1280,7 @@ public static partial class CorridorBowtieCommands
 
   private static Dictionary<string, object?> RefreshValley(CivilDocument civilDoc, Transaction transaction, Corridor corridor, int baselineIndex,
     Baseline baseline, double[] stations, BaselineRegion region, int regionIndex, string subassemblyName, Alignment valley,
-    string linkCode, double extension, double step, string? surfaceName, double tolerance, bool dryRun, bool allowMismatch)
+    string linkCode, double extension, double step, string? surfaceName, double tolerance, bool dryRun, bool allowMismatch, double clipInset)
   {
     var row = new Dictionary<string, object?>
     {
@@ -1257,7 +1345,9 @@ public static partial class CorridorBowtieCommands
     ValleyVerdict verdict;
     try
     {
-      var search = SearchValley(civilDoc, transaction, baseline, stations, side, candA, candB, linkCode, extension, step, surfaceName, _ => region);
+      var recordedInset = desc.TryGetValue("inset", out var ri2) && double.TryParse(ri2, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var iv) ? iv : 0.0;
+      var search = SearchValley(civilDoc, transaction, baseline, stations, side, candA, candB, linkCode, extension, step, surfaceName,
+        clipInset > 0 ? clipInset : recordedInset, _ => region);
       g = search.G;
       verdict = search.Verdict;
       notes.AddRange(search.Notes);
@@ -1275,10 +1365,10 @@ public static partial class CorridorBowtieCommands
     row["lean"] = g.Lean;
 
     // ---- compare with what is there
-    var shift = ValleyShift(valley, UsedPart(g));
+    var shift = ValleyShift(valley, g.BendType == "curve" ? g.ClipPoly : UsedPart(g));
     row["maxShift"] = shift.HasValue ? Math.Round(shift.Value, 4) : null;
     row["oldLength"] = Math.Round(valley.Length, 4);
-    row["newLength"] = Math.Round(PolylineLength(g.Poly), 4);
+    row["newLength"] = Math.Round(PolylineLength(g.ClipPoly), 4);
     double[] added;
     try { added = region.AdditionalStations() ?? Array.Empty<double>(); } catch { added = Array.Empty<double>(); }
     List<double> oldMeets;
@@ -1329,7 +1419,7 @@ public static partial class CorridorBowtieCommands
     if (geometryMoves)
     {
       valley.UpgradeOpen();
-      ReplaceValleyGeometry(valley, g.Poly);
+      ReplaceValleyGeometry(valley, g.ClipPoly);
     }
     var stationRows = new List<Dictionary<string, object?>>();
     var nowAdded = new List<double>();
