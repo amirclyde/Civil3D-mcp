@@ -108,6 +108,7 @@ public static partial class CorridorBowtieCommands
     public double? MeetA, MeetB, MeetOffA, MeetOffB;
     /// <summary>Curved bends: how the inside sections sit against the curve's centre of curvature.</summary>
     public int CurveSections, CurveOvershooting;
+    public double LocusFrom, LocusTo;
     public double? CurveGapAtClip;
     public Dictionary<string, object?>? Lean;
     public readonly List<string> Warnings = new();
@@ -423,7 +424,13 @@ public static partial class CorridorBowtieCommands
     // offset R(s) - inset), run on from the valley, which catches the sections in the tangents either side.
     if (g.BendType == "curve")
     {
-      var locus = CurvatureLocus(baseline, turnStart, turnEnd, sign, legA.Start, clipInset, out var inset);
+      // the sections overlap along the whole curve, not just the 5-95 % turn zone: walk out either side while the centre of
+      // curvature is still within reach of a section
+      var reachRef = Math.Max(legA.End - extension, legB.End - extension);
+      var (locusFrom, locusTo) = CurveExtent(baseline, turnStart, turnEnd, reachRef, clipInset);
+      g.LocusFrom = locusFrom;
+      g.LocusTo = locusTo;
+      var locus = CurvatureLocus(baseline, locusFrom, locusTo, sign, legA.Start, clipInset, out var inset);
       g.ClipInset = inset;
       g.LocusPoints = locus.Count;
       if (locus.Count >= 2)
@@ -479,7 +486,7 @@ public static partial class CorridorBowtieCommands
       }
     }
 
-    if (g.BendType == "curve") CurveClosure(baseline, stations, turnStart, turnEnd, sign, g);
+    if (g.BendType == "curve") CurveClosure(baseline, stations, g.LocusFrom > 0 ? g.LocusFrom : turnStart, g.LocusTo > 0 ? g.LocusTo : turnEnd, sign, g);
 
     // ---- expected lean off the bisector at the meet (plane model, angle point): u = t sin(D/2)(gA+gB) / (2 k sin(D/2) - cos(D/2)(gB-gA)),
     // k = the daylight slope there. The grade-break term dominating means the valley swings with small changes: a design question.
@@ -587,6 +594,33 @@ public static partial class CorridorBowtieCommands
       return k < 1e-6 ? null : 1.0 / k;
     }
     catch { return null; }
+  }
+
+  /// <summary>How far either side of the turn zone the sections can still overlap: while the centre of curvature is within
+  /// 1.5 x the inside reach, a section there can cross one from the tight part, so the clip line has to reach it.</summary>
+  private static (double From, double To) CurveExtent(Baseline baseline, double turnStart, double turnEnd, double reach, double requested)
+  {
+    var limit = Math.Max(3.0, 1.5 * reach);
+    double Walk(double from, double direction)
+    {
+      var at = from;
+      var misses = 0;
+      for (var i = 1; i <= 400; i++)
+      {
+        var s = from + direction * 0.25 * i;
+        var r = RadiusAt(baseline, s, 0.25);
+        var inset = requested > 0 ? requested : (r.HasValue ? Math.Clamp(0.02 * r.Value, 0.05, 0.5) : 0.05);
+        if (!r.HasValue || r.Value - inset > limit)
+        {
+          if (++misses >= 2) break;
+          continue;
+        }
+        misses = 0;
+        at = s;
+      }
+      return at;
+    }
+    return (Walk(turnStart, -1.0), Walk(turnEnd, 1.0));
   }
 
   /// <summary>The clip line inside a curve: per station the point at offset R(s) - inset, i.e. the centre of curvature pulled
@@ -707,6 +741,19 @@ public static partial class CorridorBowtieCommands
       }
     }
     else if (g.SurfaceUsed == null) v.Warnings.Add("No daylight surface: the straddle and region checks were skipped.");
+
+    // ---- a curve overlaps along its whole length: the clipped region has to cover that, not just the predicted loop
+    if (g.BendType == "curve" && g.LocusTo > g.LocusFrom && region != null)
+    {
+      var clipLo = Math.Min(g.LocusFrom, g.MeetA ?? g.LocusFrom);
+      var clipHi = Math.Max(g.LocusTo, g.MeetB ?? g.LocusTo);
+      if (clipLo < region.StartStation - 1e-6 || clipHi > region.EndStation + 1e-6)
+      {
+        v.InsideRegion = false;
+        v.SuggestedRange = new[] { Math.Floor(Math.Min(clipLo, region.StartStation) - 1.0), Math.Ceiling(Math.Max(clipHi, region.EndStation) + 1.0) };
+        v.Blocking.Add($"the curve's sections overlap between {clipLo:0.###} and {clipHi:0.###}, which region '{region.Name}' ({region.StartStation:0.###}-{region.EndStation:0.###}) does not cover: the sections outside it keep their full daylight and go on crossing");
+      }
+    }
 
     // ---- a curve only closes where a section reaches the ground before the centre of curvature
     if (g.BendType == "curve" && g.CurveSections > 0)
@@ -922,6 +969,8 @@ public static partial class CorridorBowtieCommands
       ["overshootingCentre"] = g.CurveOvershooting,
       ["clipInset"] = Math.Round(g.ClipInset, 4),
       ["designMinusGroundAtClip"] = g.CurveGapAtClip,
+      ["clipFrom"] = Math.Round(g.LocusFrom, 3),
+      ["clipTo"] = Math.Round(g.LocusTo, 3),
     },
     ["blocking"] = v.Blocking,
   };
