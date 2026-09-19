@@ -1407,21 +1407,14 @@ public static partial class CorridorBowtieCommands
     return result;
   }
 
-  /// <summary>Largest distance between the existing valley alignment and the new polyline (both sampled at 0.1 m).</summary>
+  /// <summary>Largest distance between the existing valley alignment and the new polyline. The alignment is read as its exact
+  /// vertices (fixed lines), so a kink is not cut short by sampled chords; curved entities fall back to 0.1 m sampling.</summary>
   private static double? ValleyShift(Alignment old, List<(double X, double Y, double? Z, double T, double U, string Kind)> poly)
   {
     try
     {
-      var oldPts = new List<(double X, double Y)>();
-      var s0 = old.StartingStation;
-      var s1 = old.EndingStation;
-      var n = Math.Clamp((int)Math.Ceiling((s1 - s0) / 0.1), 1, 5000);
-      for (var i = 0; i <= n; i++)
-      {
-        double x = 0, y = 0;
-        old.PointLocation(s0 + (s1 - s0) * i / n, 0.0, ref x, ref y);
-        oldPts.Add((x, y));
-      }
+      var oldPts = AlignmentVertices(old);
+      if (oldPts.Count < 2) return null;
       var newPts = poly.Select(p => (p.X, p.Y)).ToList();
       var newSamples = new List<(double X, double Y)>();
       for (var i = 1; i < newPts.Count; i++)
@@ -1431,13 +1424,52 @@ public static partial class CorridorBowtieCommands
         var m = Math.Max(1, (int)Math.Ceiling(Math.Sqrt((bx - ax) * (bx - ax) + (by - ay) * (by - ay)) / 0.1));
         for (var k = (i == 1 ? 0 : 1); k <= m; k++) newSamples.Add((ax + (bx - ax) * k / m, ay + (by - ay) * k / m));
       }
-      // the new valley's used part against the old line, and the old line's start (the PI end) against the new one
+      // the new valley's used part against the old line, and the old line's vertices against the new one (its far end may
+      // reach past the new valley's used part, so only vertices within that part count)
       var max = 0.0;
       foreach (var p in newSamples) max = Math.Max(max, DistanceToPolyline(p, oldPts));
-      max = Math.Max(max, DistanceToPolyline(oldPts[0], newPts));
+      var used = PolylineLength(poly);
+      double run = 0;
+      for (var i = 0; i < oldPts.Count; i++)
+      {
+        if (i > 0) run += Math.Sqrt(Math.Pow(oldPts[i].X - oldPts[i - 1].X, 2) + Math.Pow(oldPts[i].Y - oldPts[i - 1].Y, 2));
+        if (run > used) break;
+        max = Math.Max(max, DistanceToPolyline(oldPts[i], newPts));
+      }
       return max;
     }
     catch { return null; }
+  }
+
+  /// <summary>The alignment's vertices: line ends in order, or 0.1 m samples when it holds anything but fixed lines.</summary>
+  private static List<(double X, double Y)> AlignmentVertices(Alignment alignment)
+  {
+    var pts = new List<(double X, double Y)>();
+    var entities = alignment.Entities;
+    var allLines = entities.Count > 0;
+    for (var i = 0; i < entities.Count && allLines; i++)
+    {
+      if (entities.GetEntityByOrder(i) is AlignmentLine line)
+      {
+        var a = line.StartPoint;
+        var b = line.EndPoint;
+        if (pts.Count == 0 || Math.Abs(pts[^1].X - a.X) > 1e-6 || Math.Abs(pts[^1].Y - a.Y) > 1e-6) pts.Add((a.X, a.Y));
+        pts.Add((b.X, b.Y));
+      }
+      else allLines = false;
+    }
+    if (allLines && pts.Count >= 2) return pts;
+    pts.Clear();
+    var s0 = alignment.StartingStation;
+    var s1 = alignment.EndingStation;
+    var n = Math.Clamp((int)Math.Ceiling((s1 - s0) / 0.1), 1, 5000);
+    for (var i = 0; i <= n; i++)
+    {
+      double x = 0, y = 0;
+      alignment.PointLocation(s0 + (s1 - s0) * i / n, 0.0, ref x, ref y);
+      pts.Add((x, y));
+    }
+    return pts;
   }
 
   private static double DistanceToPolyline((double X, double Y) p, List<(double X, double Y)> pts)
