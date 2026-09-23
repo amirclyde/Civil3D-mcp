@@ -137,7 +137,7 @@ export class ApplicationClientConnection {
     }
   }
 
-  public sendCommand(command: string, params: any = {}): Promise<any> {
+  public sendCommand(command: string, params: any = {}, timeoutMs: number = COMMAND_TIMEOUT_MS): Promise<any> {
     return new Promise((resolve, reject) => {
       if (!this.isConnected && !this.connect()) {
         reject(new Error(`Failed to connect to Civil 3D plugin at ${this.host}:${this.port}.`));
@@ -157,10 +157,10 @@ export class ApplicationClientConnection {
         const pending = this.responseCallbacks.get(requestId);
         if (pending) {
           this.responseCallbacks.delete(requestId);
-          log.warn("Command timed out", { method: command, requestId, timeoutMs: COMMAND_TIMEOUT_MS });
-          pending.reject(new Error(`Command timed out after ${COMMAND_TIMEOUT_MS}ms: ${command}`));
+          log.warn("Command timed out", { method: command, requestId, timeoutMs });
+          pending.reject(new Error(`Command timed out after ${timeoutMs}ms: ${command}`));
         }
-      }, COMMAND_TIMEOUT_MS);
+      }, timeoutMs);
 
       this.responseCallbacks.set(requestId, {
         timeout,

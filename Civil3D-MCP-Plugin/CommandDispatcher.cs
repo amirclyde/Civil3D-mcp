@@ -154,6 +154,7 @@ public static class CommandDispatcher
       "bowtieSeam" => CorridorBowtieCommands.BowtieSeamAsync(parameters),
       "bowtieBends" => CorridorBowtieCommands.BowtieBendsAsync(parameters),
       "bowtieUnfix" => CorridorBowtieCommands.BowtieUnfixAsync(parameters),
+      "bowtieRefreshSeams" => CorridorBowtieCommands.BowtieRefreshSeamsAsync(parameters),
       "checkCorridorBowties" => CorridorBowtieCommands.CheckBowtiesAsync(parameters),
       "corridorRegionStations" => CorridorBowtieCommands.CorridorRegionStationsAsync(parameters),
       "listIntersections" => IntersectionCommands.ListIntersectionsAsync(parameters),

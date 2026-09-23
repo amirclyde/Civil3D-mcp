@@ -1904,9 +1904,30 @@ public static partial class CorridorBowtieCommands
         throw new JsonRpcDispatchException("CIVIL3D.INVALID_STATE", $"Corridor '{corridor.Name}' has no applied stations - rebuild it first.");
       var a = start ?? all[0];
       var b = end ?? all[^1];
+      var (report, totalCrossings, totalLoops, stationsRead) = CheckBuilt(baseline, all, a, b, side == "both" ? new[] { "left", "right" } : new[] { side }, linkCode, minOffset, code, maxListed, tolerance);
+      return new Dictionary<string, object?>
+      {
+        ["corridorName"] = corridor.Name,
+        ["baselineIndex"] = baselineIndex,
+        ["startStation"] = a,
+        ["endStation"] = b,
+        ["stationsRead"] = stationsRead,
+        ["linkCode"] = linkCode,
+        ["minOffset"] = minOffset,
+        ["clean"] = totalCrossings == 0 && totalLoops == 0,
+        ["sides"] = report,
+        ["tolerance"] = tolerance,
+        ["method"] = "Built sections only: every pair of links from different applied stations is tested for a plan crossing more than `tolerance` from the link ends; the feature line is the outermost point with the code at each applied station, joined by straight chords.",
+      };
+    });
+  }
+
+  /// <summary>Link crossings and feature-line loops in the built corridor between two stations (bowtie_check's test).</summary>
+  private static (List<Dictionary<string, object?>> Report, int Crossings, int Loops, int StationsRead) CheckBuilt(Baseline baseline, double[] all,
+    double a, double b, string[] sides, string linkCode, double minOffset, string code, int maxListed, double tolerance)
+  {
       var stations = all.Where(s => s >= a - StationTolerance && s <= b + StationTolerance).ToArray();
 
-      var sides = side == "both" ? new[] { "left", "right" } : new[] { side };
       var links = sides.ToDictionary(sd => sd, _ => new List<BuiltLink>());
       var codePts = sides.ToDictionary(sd => sd, _ => new List<(double S, double X, double Y, double Tx, double Ty)>());
       var valleyCount = sides.ToDictionary(sd => sd, _ => 0);
@@ -2029,21 +2050,7 @@ public static partial class CorridorBowtieCommands
         });
       }
 
-      return new Dictionary<string, object?>
-      {
-        ["corridorName"] = corridor.Name,
-        ["baselineIndex"] = baselineIndex,
-        ["startStation"] = a,
-        ["endStation"] = b,
-        ["stationsRead"] = stations.Length - unreadable,
-        ["linkCode"] = linkCode,
-        ["minOffset"] = minOffset,
-        ["clean"] = totalCrossings == 0 && totalLoops == 0,
-        ["sides"] = report,
-        ["tolerance"] = tolerance,
-        ["method"] = "Built sections only: every pair of links from different applied stations is tested for a plan crossing more than `tolerance` from the link ends; the feature line is the outermost point with the code at each applied station, joined by straight chords.",
-      };
-    });
+      return (report, totalCrossings, totalLoops, stations.Length - unreadable);
   }
 
   private static IEnumerable<string> ReadCodes(CorridorCodeCollection? codes)

@@ -87,121 +87,14 @@ public static partial class CorridorBowtieCommands
     {
       var corridor = CivilObjectUtils.FindCorridorByName(civilDoc, transaction, corridorName, dryRun ? OpenMode.ForRead : OpenMode.ForWrite);
       var baseline = GetBaseline(corridor, baselineIndex);
-      var stations = AppliedStationsOrThrow(corridor, baseline);
-      var warnings = new List<string>();
-
-      // ---------------------------------------------------------------- snapshot: baseline
-      var from = Math.Max(baseline.StartStation, startStation - searchMargin);
-      var to = Math.Min(baseline.EndStation, endStation + searchMargin);
-      var samples = SampleBaselineForSeam(baseline, from, to);
-      var turn = samples.Turn(Math.Max(from, startStation), Math.Min(to, endStation));
-      if (Math.Abs(turn) < Math.PI / 180)
-        throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", $"The baseline turns only {turn * 180 / Math.PI:0.##} deg between {startStation:0.###} and {endStation:0.###}: there is no bend in that range.");
-      var side = turn > 0 ? "left" : "right";
-      if (sideArg != "" && sideArg != side)
-        throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", $"The {sideArg} side is the outside of this bend (it turns {side}); the bowtie is on the {side} side.");
-      var sign = side == "left" ? -1.0 : 1.0;
-
-      // ---------------------------------------------------------------- snapshot: sections (unclipped inside link chains)
-      var sections = new List<K.SectionSample>();
-      var clipped = new List<double>();
-      var unread = new List<double>();
-      var boundaries = 0;
-      foreach (var s in stations)
+      var solved = SolveSeam(civilDoc, transaction, corridor, baseline, baselineIndex, new SeamSolveArgs
       {
-        if (s < from - StationTolerance || s > to + StationTolerance) continue;
-        // where one region ends and the next starts, both sections are read (in station order of their regions), so the
-        // kernel sees the change of section as the step it is instead of blending the two
-        var applied = AppliedAssembliesAt(baseline, s);
-        if (applied.Count > 1) boundaries++;
-        var any = false;
-        foreach (var a in applied)
-        {
-          var sample = ReadSeamSection(a, s, sign, linkCode);
-          if (sample == null) continue;
-          any = true;
-          if (sample.Clipped && !clipped.Contains(s)) clipped.Add(s);
-          sections.Add(sample);
-        }
-        if (!any) unread.Add(s);
-      }
-      if (sections.Count < 2)
-        throw new JsonRpcDispatchException("CIVIL3D.INVALID_STATE", $"Fewer than two sections with {linkCode}-coded links on the {side} side between {from:0.###} and {to:0.###}. Rebuild the corridor, or check linkCode.");
-      if (unread.Count > 0)
-        warnings.Add($"{unread.Count} applied station(s) in range have no {linkCode}-coded inside links and were left out ({string.Join(", ", unread.Take(6).Select(x => x.ToString("0.###")))}{(unread.Count > 6 ? ", ..." : "")}).");
-
-      // A neighbouring bend that is already repaired has clipped sections: they are no evidence for this bend, so the
-      // search range stops short of them. Only clipped sections inside this bend itself refuse the solve.
-      {
-        var inBend = clipped.Where(c => c >= startStation - StationTolerance && c <= endStation + StationTolerance).ToList();
-        var before = clipped.Where(c => c < startStation - StationTolerance).DefaultIfEmpty(double.NaN).Max();
-        var after = clipped.Where(c => c > endStation + StationTolerance).DefaultIfEmpty(double.NaN).Min();
-        if (inBend.Count == 0 && (!double.IsNaN(before) || !double.IsNaN(after)))
-        {
-          if (!double.IsNaN(before)) from = Math.Max(from, before + 0.001);
-          if (!double.IsNaN(after)) to = Math.Min(to, after - 0.001);
-          sections.RemoveAll(x => x.Station < from - StationTolerance || x.Station > to + StationTolerance);
-          warnings.Add($"A repaired neighbouring bend has clipped sections ({string.Join(", ", clipped.Take(4).Select(x => x.ToString("0.###")))}{(clipped.Count > 4 ? ", ..." : "")}): the search range is trimmed to {from:0.###}-{to:0.###}.");
-          clipped.Clear();
-          if (sections.Count < 2)
-            throw new JsonRpcDispatchException("CIVIL3D.INVALID_STATE", $"Between the repaired neighbouring bends there are fewer than two sections ({from:0.###}-{to:0.###}). Nothing was changed.");
-        }
-      }
-
-      // ---------------------------------------------------------------- snapshot: daylight surface
-      CivilSurface? surface; string? surfaceUsed;
-      if (!string.IsNullOrWhiteSpace(surfaceName)) (surface, surfaceUsed) = FindSurface(civilDoc, transaction, surfaceName!);
-      else (surface, surfaceUsed) = SurfaceFromTargets(baseline, transaction, 0.5 * (startStation + endStation));
-      Func<double, double, double?>? ground = null;
-      if (surface != null)
-      {
-        var sf = surface;
-        ground = (x, y) => { try { return sf.FindElevationAtXY(x, y); } catch { return null; } };
-        // where each section ends against the real surface: the kernel decides from it whether a section ends on the
-        // ground, and an offline snapshot carries it because its ground grid is only an approximation of the surface
-        var kSide = sign < 0 ? K.Side.Left : K.Side.Right;
-        foreach (var sec in sections)
-        {
-          var (c, th) = samples.At(sec.Station);
-          var q = c + K.SampledBaseline.InsideNormal(th, kSide) * sec.Reach;
-          var g = ground(q.X, q.Y);
-          if (g.HasValue) sec.EndGap = sec.Z0 + sec.Template[^1].Dz - g.Value;
-        }
-      }
-      else warnings.Add("No daylight surface (pass surfaceName, or map a surface target in the region): the seam end is taken from where the sections stop covering the same ground.");
-
-      if (!string.IsNullOrWhiteSpace(snapshotPath))
-      {
-        var snap = new K.Snapshot
-        {
-          Corridor = corridor.Name, Baseline = baseline.Name, BendFrom = startStation, BendTo = endStation,
-          Samples = new K.Snapshot.BaselineDto { S = samples.S, X = samples.X, Y = samples.Y, Dir = samples.Th },
-          Sections = sections.Select(x => new K.Snapshot.SectionDto { Station = x.Station, Z0 = x.Z0, Clipped = x.Clipped, EndGap = x.EndGap, HingeAt = x.HingeAt, Template = x.Template.Select(p => new[] { p.Off, p.Dz }).ToList() }).ToList(),
-          Ground = ground == null ? null : SeamGroundGrid(samples, sections, sign, ground),
-        };
-        var json = JsonSerializer.Serialize(snap, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, WriteIndented = false, NumberHandling = System.Text.Json.Serialization.JsonNumberHandling.AllowNamedFloatingPointLiterals });
-        var written = FileBoundary.WriteAllTextAtomic(snapshotPath!, json, new UTF8Encoding(false), true, ".json");
-        warnings.Add($"Snapshot written to {written} (solve it offline with: dotnet run -c Release -- solve <file>).");
-      }
-
-      if (clipped.Count > 0)
-        throw new JsonRpcDispatchException("CIVIL3D.INVALID_STATE",
-          $"{clipped.Count} section(s) in range are already clipped (they carry a Valley point): {string.Join(", ", clipped.Take(8).Select(x => x.ToString("0.###")))}{(clipped.Count > 8 ? ", ..." : "")}. " +
-          "The seam is only ever computed from unclipped sections. Unmap the ClipTarget in that region (or put the stock assembly back), rebuild, and run this again. Nothing was changed.");
-
-      // ---------------------------------------------------------------- solve
-      var regionForParts = RegionAtStation(baseline, 0.5 * (startStation + endStation));
-      var adjustFrom = adjustFromArg != "auto" ? adjustFromArg
-        : DetectAdjustFrom(civilDoc, transaction, detectAssembly, regionForParts, side, warnings);
-      var options = new K.SolveOptions
-      {
-        Step = step, CapInset = capInset, MaxLevelStep = maxLevelStep, LevelFromTarget = levelFromTarget, MaxLevelAdjust = maxLevelAdjust,
-        AcceptOffSurfaceEnds = acceptOffSurfaceEnds,
-        AdjustFrom = adjustFrom == "hinge" ? K.AdjustFrom.FromHinge : K.AdjustFrom.LastLink,
-        LevelRule = levelRuleArg == "mean" ? K.LevelRule.Mean : K.LevelRule.NoSteeper,
-      };
-      var result = K.SeamSolver.Solve(samples, new K.SectionSet(sections, extension), ground, startStation, endStation, options, from, to);
-      warnings.AddRange(result.Warnings);
+        Start = startStation, End = endStation, SideArg = sideArg, LinkCode = linkCode, SurfaceName = surfaceName, Extension = extension, Step = step,
+        CapInset = capInset, SearchMargin = searchMargin, MaxLevelStep = maxLevelStep, MaxLevelAdjust = maxLevelAdjust, AcceptOffSurfaceEnds = acceptOffSurfaceEnds,
+        AdjustFrom = adjustFromArg, ClipAssembly = detectAssembly, LevelRule = levelRuleArg, LevelFromTarget = levelFromTarget, SnapshotPath = snapshotPath,
+      });
+      var (result, samples, sections, stations, from, to, side, surfaceUsed, boundaries, adjustFrom, warnings) =
+        (solved.Result, solved.Samples, solved.Sections, solved.Stations, solved.From, solved.To, solved.Side, solved.SurfaceUsed, solved.Boundaries, solved.AdjustFrom, solved.Warnings);
 
       var region = RegionAtStation(baseline, result.ApexStation > 0 ? result.ApexStation : 0.5 * (startStation + endStation));
       var blocking = new List<string>();
@@ -334,6 +227,162 @@ public static partial class CorridorBowtieCommands
       };
     };
     return dryRun ? CivilExecution.ReadAsync<object?>(work) : CivilExecution.WriteAsync<object?>(work);
+  }
+
+  /// <summary>What one bend's valley solve needs (the bowtie_seam arguments).</summary>
+  private sealed class SeamSolveArgs
+  {
+    public double Start, End;
+    public string SideArg = "";
+    public string LinkCode = "Top";
+    public string? SurfaceName;
+    public double Extension = 3.0, Step = 0.1, CapInset = 0.05, SearchMargin = 60.0, MaxLevelStep = 0.30, MaxLevelAdjust = 0.30;
+    public bool AcceptOffSurfaceEnds;
+    public string AdjustFrom = "auto";
+    public string? ClipAssembly;
+    public string LevelRule = "no_steeper";
+    public bool LevelFromTarget = true;
+    public string? SnapshotPath;
+  }
+
+  private sealed class SeamSolveOutcome
+  {
+    public K.SeamResult Result = null!;
+    public K.SampledBaseline Samples = null!;
+    public List<K.SectionSample> Sections = null!;
+    public double[] Stations = null!;
+    public double From, To, Sign;
+    public string Side = "";
+    public string? SurfaceUsed;
+    public int Boundaries;
+    public string AdjustFrom = "";
+    public List<string> Warnings = null!;
+  }
+
+  /// <summary>Reads the snapshot of one bend (baseline, unclipped inside sections, daylight surface) and solves its valley.
+  /// Throws (nothing changed) when there is no bend in range or a section in range is already clipped.</summary>
+  private static SeamSolveOutcome SolveSeam(CivilDocument civilDoc, Transaction transaction, Corridor corridor, Baseline baseline, int baselineIndex, SeamSolveArgs args)
+  {
+      var stations = AppliedStationsOrThrow(corridor, baseline);
+      var warnings = new List<string>();
+
+      // ---------------------------------------------------------------- snapshot: baseline
+      var from = Math.Max(baseline.StartStation, args.Start - args.SearchMargin);
+      var to = Math.Min(baseline.EndStation, args.End + args.SearchMargin);
+      var samples = SampleBaselineForSeam(baseline, from, to);
+      var turn = samples.Turn(Math.Max(from, args.Start), Math.Min(to, args.End));
+      if (Math.Abs(turn) < Math.PI / 180)
+        throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", $"The baseline turns only {turn * 180 / Math.PI:0.##} deg between {args.Start:0.###} and {args.End:0.###}: there is no bend in that range.");
+      var side = turn > 0 ? "left" : "right";
+      if (args.SideArg != "" && args.SideArg != side)
+        throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", $"The {args.SideArg} side is the outside of this bend (it turns {side}); the bowtie is on the {side} side.");
+      var sign = side == "left" ? -1.0 : 1.0;
+
+      // ---------------------------------------------------------------- snapshot: sections (unclipped inside link chains)
+      var sections = new List<K.SectionSample>();
+      var clipped = new List<double>();
+      var unread = new List<double>();
+      var boundaries = 0;
+      foreach (var s in stations)
+      {
+        if (s < from - StationTolerance || s > to + StationTolerance) continue;
+        // where one region ends and the next starts, both sections are read (in station order of their regions), so the
+        // kernel sees the change of section as the step it is instead of blending the two
+        var applied = AppliedAssembliesAt(baseline, s);
+        if (applied.Count > 1) boundaries++;
+        var any = false;
+        foreach (var a in applied)
+        {
+          var sample = ReadSeamSection(a, s, sign, args.LinkCode);
+          if (sample == null) continue;
+          any = true;
+          if (sample.Clipped && !clipped.Contains(s)) clipped.Add(s);
+          sections.Add(sample);
+        }
+        if (!any) unread.Add(s);
+      }
+      if (sections.Count < 2)
+        throw new JsonRpcDispatchException("CIVIL3D.INVALID_STATE", $"Fewer than two sections with {args.LinkCode}-coded links on the {side} side between {from:0.###} and {to:0.###}. Rebuild the corridor, or check args.LinkCode.");
+      if (unread.Count > 0)
+        warnings.Add($"{unread.Count} applied station(s) in range have no {args.LinkCode}-coded inside links and were left out ({string.Join(", ", unread.Take(6).Select(x => x.ToString("0.###")))}{(unread.Count > 6 ? ", ..." : "")}).");
+
+      // A neighbouring bend that is already repaired has clipped sections: they are no evidence for this bend, so the
+      // search range stops short of them. Only clipped sections inside this bend itself refuse the solve.
+      {
+        var inBend = clipped.Where(c => c >= args.Start - StationTolerance && c <= args.End + StationTolerance).ToList();
+        var before = clipped.Where(c => c < args.Start - StationTolerance).DefaultIfEmpty(double.NaN).Max();
+        var after = clipped.Where(c => c > args.End + StationTolerance).DefaultIfEmpty(double.NaN).Min();
+        if (inBend.Count == 0 && (!double.IsNaN(before) || !double.IsNaN(after)))
+        {
+          if (!double.IsNaN(before)) from = Math.Max(from, before + 0.001);
+          if (!double.IsNaN(after)) to = Math.Min(to, after - 0.001);
+          sections.RemoveAll(x => x.Station < from - StationTolerance || x.Station > to + StationTolerance);
+          warnings.Add($"A repaired neighbouring bend has clipped sections ({string.Join(", ", clipped.Take(4).Select(x => x.ToString("0.###")))}{(clipped.Count > 4 ? ", ..." : "")}): the search range is trimmed to {from:0.###}-{to:0.###}.");
+          clipped.Clear();
+          if (sections.Count < 2)
+            throw new JsonRpcDispatchException("CIVIL3D.INVALID_STATE", $"Between the repaired neighbouring bends there are fewer than two sections ({from:0.###}-{to:0.###}). Nothing was changed.");
+        }
+      }
+
+      // ---------------------------------------------------------------- snapshot: daylight surface
+      CivilSurface? surface; string? surfaceUsed;
+      if (!string.IsNullOrWhiteSpace(args.SurfaceName)) (surface, surfaceUsed) = FindSurface(civilDoc, transaction, args.SurfaceName!);
+      else (surface, surfaceUsed) = SurfaceFromTargets(baseline, transaction, 0.5 * (args.Start + args.End));
+      Func<double, double, double?>? ground = null;
+      if (surface != null)
+      {
+        var sf = surface;
+        ground = (x, y) => { try { return sf.FindElevationAtXY(x, y); } catch { return null; } };
+        // where each section ends against the real surface: the kernel decides from it whether a section ends on the
+        // ground, and an offline snapshot carries it because its ground grid is only an approximation of the surface
+        var kSide = sign < 0 ? K.Side.Left : K.Side.Right;
+        foreach (var sec in sections)
+        {
+          var (c, th) = samples.At(sec.Station);
+          var q = c + K.SampledBaseline.InsideNormal(th, kSide) * sec.Reach;
+          var g = ground(q.X, q.Y);
+          if (g.HasValue) sec.EndGap = sec.Z0 + sec.Template[^1].Dz - g.Value;
+        }
+      }
+      else warnings.Add("No daylight surface (pass args.SurfaceName, or map a surface target in the region): the seam end is taken from where the sections stop covering the same ground.");
+
+      if (!string.IsNullOrWhiteSpace(args.SnapshotPath))
+      {
+        var snap = new K.Snapshot
+        {
+          Corridor = corridor.Name, Baseline = baseline.Name, BendFrom = args.Start, BendTo = args.End,
+          Samples = new K.Snapshot.BaselineDto { S = samples.S, X = samples.X, Y = samples.Y, Dir = samples.Th },
+          Sections = sections.Select(x => new K.Snapshot.SectionDto { Station = x.Station, Z0 = x.Z0, Clipped = x.Clipped, EndGap = x.EndGap, HingeAt = x.HingeAt, Template = x.Template.Select(p => new[] { p.Off, p.Dz }).ToList() }).ToList(),
+          Ground = ground == null ? null : SeamGroundGrid(samples, sections, sign, ground),
+        };
+        var json = JsonSerializer.Serialize(snap, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, WriteIndented = false, NumberHandling = System.Text.Json.Serialization.JsonNumberHandling.AllowNamedFloatingPointLiterals });
+        var written = FileBoundary.WriteAllTextAtomic(args.SnapshotPath!, json, new UTF8Encoding(false), true, ".json");
+        warnings.Add($"Snapshot written to {written} (solve it offline with: dotnet run -c Release -- solve <file>).");
+      }
+
+      if (clipped.Count > 0)
+        throw new JsonRpcDispatchException("CIVIL3D.INVALID_STATE",
+          $"{clipped.Count} section(s) in range are already clipped (they carry a Valley point): {string.Join(", ", clipped.Take(8).Select(x => x.ToString("0.###")))}{(clipped.Count > 8 ? ", ..." : "")}. " +
+          "The seam is only ever computed from unclipped sections. Unmap the ClipTarget in that region (or put the stock assembly back), rebuild, and run this again. Nothing was changed.");
+
+      // ---------------------------------------------------------------- solve
+      var regionForParts = RegionAtStation(baseline, 0.5 * (args.Start + args.End));
+      var adjustFrom = args.AdjustFrom != "auto" ? args.AdjustFrom
+        : DetectAdjustFrom(civilDoc, transaction, args.ClipAssembly, regionForParts, side, warnings);
+      var options = new K.SolveOptions
+      {
+        Step = args.Step, CapInset = args.CapInset, MaxLevelStep = args.MaxLevelStep, LevelFromTarget = args.LevelFromTarget, MaxLevelAdjust = args.MaxLevelAdjust,
+        AcceptOffSurfaceEnds = args.AcceptOffSurfaceEnds,
+        AdjustFrom = adjustFrom == "hinge" ? K.AdjustFrom.FromHinge : K.AdjustFrom.LastLink,
+        LevelRule = args.LevelRule == "mean" ? K.LevelRule.Mean : K.LevelRule.NoSteeper,
+      };
+      var result = K.SeamSolver.Solve(samples, new K.SectionSet(sections, args.Extension), ground, args.Start, args.End, options, from, to);
+      warnings.AddRange(result.Warnings);
+      return new SeamSolveOutcome
+      {
+        Result = result, Samples = samples, Sections = sections, Stations = stations, From = from, To = to, Sign = sign, Side = side,
+        SurfaceUsed = surfaceUsed, Boundaries = boundaries, AdjustFrom = adjustFrom, Warnings = warnings,
+      };
   }
 
   private static bool FeatureLineNameInUse(CivilDocument civilDoc, Database database, Transaction transaction, string name)

@@ -753,5 +753,63 @@ Test("snapshot round trip: save, load, solve - the same seam to the millimetre",
   True(Snapshot.ToJson(ResultReport.Of(solved)).Contains("\"status\": \"Ok\""), "report");
 });
 
+
+// ---------------------------------------------------------------------------------------------------- refresh
+Test("refresh: polyline deviation - same shape with other vertices is 0; shift, level, tail and interior bulge are measured", () =>
+{
+  var a = new List<P3> { new(0, 0, 10), new(10, 0, 11) };
+  var a2 = new List<P3> { new(0, 0, 10), new(2.5, 0, 10.25), new(7, 0, 10.7), new(10, 0, 11) };
+  var (p0, l0) = Refresh.Deviation(a, a2);
+  Near(p0, 0, 1e-9, "same shape, plan"); Near(l0, 0, 1e-9, "same shape, level");
+  var shifted = a.Select(q => new P3(q.X, q.Y + 0.3, q.Z)).ToList();
+  Near(Refresh.Deviation(a, shifted).Plan, 0.3, 1e-9, "lateral shift");
+  var raised = a.Select(q => new P3(q.X, q.Y, q.Z + 0.05)).ToList();
+  var (pr, lr) = Refresh.Deviation(a, raised);
+  Near(pr, 0, 1e-9, "raised, plan"); Near(lr, 0.05, 1e-9, "raised, level");
+  var longer = new List<P3> { new(0, 0, 10), new(12, 0, 11.2) };
+  Near(Refresh.Deviation(a, longer).Plan, 2, 1e-9, "a longer line: its tail counts");
+  var bulge = new List<P3> { new(0, 0, 10), new(5, 0.4, 10.5), new(10, 0, 11) };
+  Near(Refresh.Deviation(a, bulge).Plan, 0.4, 1e-9, "a vertex of the other line off this one");
+  Near(Refresh.Deviation(bulge, a).Plan, 0.4, 1e-9, "symmetric");
+});
+
+Test("refresh: section compare - same design agrees, other slope / lane width / reach are found", () =>
+{
+  SectionSample S(double lane, double slope, double reach, double start = 1.05) => new SectionSample
+  {
+    Station = 100, Z0 = 20,
+    Template = { (start, 0), (lane, 0), (reach, (reach - lane) * slope) },
+  };
+  var stock = S(4.75, 0.5, 9.0);
+  var d0 = Refresh.Compare(stock, S(4.75, 0.5, 9.0));
+  True(d0.Within(0.005, 0.02), $"identical: level {d0.MaxLevel}, reach {d0.ReachDiff}");
+  var clipWithExtraVertex = new SectionSample { Station = 100, Z0 = 20, Template = { (1.05, 0), (3.0, 0), (4.75, 0), (6.0, 0.625), (9.0, 2.125) } };
+  True(Refresh.Compare(stock, clipWithExtraVertex).Within(0.005, 0.02), "extra vertices on the same surface agree");
+  var flatter = Refresh.Compare(stock, S(4.75, 0.45, 9.0));
+  Near(flatter.MaxLevel, 4.25 * 0.05, 1e-9, "1:2 against 1:2.22 at the reach"); True(!flatter.Within(0.01, 0.05), "flagged");
+  var wider = Refresh.Compare(stock, S(5.0, 0.5, 9.0));
+  Near(wider.MaxLevel, 0.125, 1e-9, "lane 0.25 m wider: slope starts later"); True(!wider.Within(0.01, 0.05), "flagged");
+  var shorter = Refresh.Compare(stock, S(4.75, 0.5, 8.0));
+  Near(shorter.ReachDiff, 1.0, 1e-9, "reach"); True(!shorter.Within(0.01, 0.05), "flagged");
+});
+
+Test("refresh: the same design solves to the same valley; a flatter cut slope moves it", () =>
+{
+  var bl = AnglePoint(30, true);
+  SeamResult Solve(double slope) =>
+    SeamSolver.Solve(bl, MakeSections(bl, Side.Left, Every(130, 190, 1), s => 10 + 0.01 * (s - 160), (_, _) => 12, slope: slope), (_, _) => 12, 159, 161);
+  List<P3> Line(SeamResult r) => r.Seam.Select(q => new P3(q.X, q.Y, double.IsNaN(q.Z) ? r.ApexZ ?? 0 : q.Z)).ToList();
+  var first = Solve(0.5); var again = Solve(0.5);
+  Healthy(first);
+  var (p, l) = Refresh.Deviation(Line(first), Line(again));
+  Near(p, 0, 1e-9, "same design, plan"); Near(l, 0, 1e-9, "same design, level");
+  Near(first.MeetA!.Value, again.MeetA!.Value, 1e-9, "same meet station");
+  var flatter = Solve(1.0 / 3);
+  Healthy(flatter);
+  var (pf, _) = Refresh.Deviation(Line(first), Line(flatter));
+  True(pf > 0.5, $"a 1:3 cut reaches further than 1:2: the valley moves ({pf:0.###} m)");
+  True(flatter.MeetA!.Value < first.MeetA!.Value - 0.2, $"incoming meet station moves back ({first.MeetA:0.###} -> {flatter.MeetA:0.###})");
+});
+
 Console.WriteLine($"\n{passed} passed, {failed} failed");
 return failed;
