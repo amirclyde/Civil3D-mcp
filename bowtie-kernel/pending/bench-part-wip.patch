@@ -1,0 +1,280 @@
+diff -ru -x bin -x obj orig/bowtie-kernel/BowtieKernel/SeamSolver.cs bowtie-kernel/BowtieKernel/SeamSolver.cs
+--- orig/bowtie-kernel/BowtieKernel/SeamSolver.cs	2026-09-21 08:34:41.491565393 +0800
++++ bowtie-kernel/BowtieKernel/SeamSolver.cs	2026-09-21 07:54:09.718679419 +0800
+@@ -10,6 +10,9 @@
+   public double Overshoot = 0.10;
+   /// <summary>A seam point counts only where at least one side is on a link steeper than this.</summary>
+   public double MinSlope = 0.1;
++  /// <summary>A steep link shorter than this (a drain wall, a kerb face) is not a slope the two sides can meet on: it is
++  /// treated like the flat link it sits in. The daylight link at the end of a section is exempt.</summary>
++  public double MinSlopeRun = 0.5;
+   public double SimplifyTolerance = 0.005;
+   /// <summary>Largest difference in first-point / hinge offset between the two ends of the bend before it is a section change.</summary>
+   public double TemplateTolerance = 0.05;
+@@ -25,6 +28,8 @@
+   public double MaxLevelAdjust = 0.30;
+   /// <summary>Length over which the valley level runs out from the mean to the ground where the valley ends on one side's daylight.</summary>
+   public double EndTaper = 1.0;
++  /// <summary>A section whose last point is further than this from the ground, in level, does not end on the ground.</summary>
++  public double EndOnGroundTolerance = 0.10;
+   /// <summary>Geometric tolerance for "the same crossing".</summary>
+   public double CrossingTolerance = 0.02;
+ }
+@@ -95,6 +100,8 @@
+   public double LevelStep;
+   /// <summary>Stations either side of the apex where the inside daylight changes between cut and fill, if it does.</summary>
+   public List<double> CutFillChanges = new();
++  /// <summary>True when sections in range do not end on the ground (terminal bench): the valley then ends by separation.</summary>
++  public bool OpenEnded;
+ }
+ 
+ /// <summary>
+@@ -192,6 +199,30 @@
+     if (sections.Sections.Any(s => s.Clipped && s.Station >= lo && s.Station <= hi))
+     { r.Status = SeamStatus.Unsupported; r.Reasons.Add("Some sections in range are clipped: the seam must be computed from unclipped sections."); return r; }
+ 
++    // ---------------------------------------------------------------- do the sections end on the ground?
++    // A daylight link ends on the ground. A benched part can instead meet the ground part of the way out and then carry on
++    // with a terminal bench and drain whatever the ground does: such a section is "open ended". It is not extended past its
++    // last point, a crossing of design and ground along it is not its daylight, and its valley ends where the two sides stop
++    // covering the same ground rather than at the ground.
++    var openEnded = new List<double>();
++    if (ground != null)
++      foreach (var sec in sections.Sections.Where(x => x.Station >= lo - 1e-9 && x.Station <= hi + 1e-9))
++      {
++        if (bl.Corners.Any(c => Math.Abs(c.Station - sec.Station) < 1e-6)) continue;
++        var (c0, th0) = bl.At(sec.Station); var n0 = SampledBaseline.InsideNormal(th0, side);
++        double? Gap(double off) { var q = c0 + n0 * off; var g = ground(q.X, q.Y); var dz = sec.Dz(off, 0); return g.HasValue && dz.HasValue ? sec.Z0 + dz.Value - g.Value : null; }
++        var atEnd = Gap(sec.Reach);
++        if (!atEnd.HasValue || Math.Abs(atEnd.Value) <= opt.EndOnGroundTolerance) continue;
++        // it must have met the ground on the way out; a section that never comes near the ground is the wrong surface, not a bench
++        var from = sec.HingeOffset ?? sec.StartOffset; double? first = null; var met = false;
++        for (var o = from; o <= sec.Reach && !met; o += 0.1) { var d = Gap(o); if (!d.HasValue) continue; first ??= d; met = first.Value * d.Value <= 0 || Math.Abs(d.Value) <= opt.EndOnGroundTolerance; }
++        if (!met) continue;
++        sec.Extend = false; openEnded.Add(sec.Station);
++      }
++    r.OpenEnded = openEnded.Count > 0;
++    if (r.OpenEnded)
++      r.Warnings.Add($"{openEnded.Count} inside sections between {openEnded[0]:0.##} and {openEnded[^1]:0.##} do not end on the ground (they meet it on the way out and carry on, as a part with a terminal bench does): the valley is carried out to where the two sides stop covering the same ground.");
++
+     // ---------------------------------------------------------------- is there a bowtie at all?
+     {
+       var segs = new List<(P2, P2)>();
+@@ -225,6 +256,7 @@
+     var tCap = 2 * reachMax + 2;
+     var candidates = new List<(double T, List<(double U, string Kind)> Roots)>();
+     var laneCandidates = new List<(double T, List<(double U, string Kind)> Roots)>();
++    var benchCandidates = new List<(double T, List<(double U, string Kind)> Roots)>();
+     var empty = 0;
+     for (var t = opt.Step; t <= tCap; t += opt.Step)
+     {
+@@ -262,11 +294,12 @@
+         if (!ea.HasValue || !eb.HasValue || ea.Value.O < sections.StartOffset(ea.Value.S) || eb.Value.O < sections.StartOffset(eb.Value.S)) return default;
+         var s1 = sections.Slope(ea.Value.S, ea.Value.O); var s2 = sections.Slope(eb.Value.S, eb.Value.O);
+         if (!s1.HasValue || !s2.HasValue) return default;
+-        var a1 = Math.Abs(s1.Value) > opt.MinSlope; var a2 = Math.Abs(s2.Value) > opt.MinSlope;
++        var a1 = Math.Abs(s1.Value) > opt.MinSlope && sections.LinkRun(ea.Value.S, ea.Value.O) >= opt.MinSlopeRun;
++        var a2 = Math.Abs(s2.Value) > opt.MinSlope && sections.LinkRun(eb.Value.S, eb.Value.O) >= opt.MinSlopeRun;
+         return (true, a1, a2, a1 && a2 && s1.Value * s2.Value < 0, Covered(ea.Value) && Covered(eb.Value));
+       }
+ 
+-      var roots = new List<(double U, string Kind)>(); var lane = new List<(double U, string Kind)>();
++      var roots = new List<(double U, string Kind)>(); var lane = new List<(double U, string Kind)>(); var bench = new List<(double U, string Kind)>();
+       foreach (var u in Roots((ea, eb) => ea.Z - eb.Z))
+       {
+         var k = Classify(u);
+@@ -281,17 +314,20 @@
+       {
+         var k = Classify(u);
+         if (!k.Ok || !k.Cover) continue;
++        if (!k.Opposite) bench.Add((u, "plan"));
+         if (k.Opposite) roots.Add((u, "plan"));
+         else if (!k.SlopedA && !k.SlopedB) lane.Add((u, "lane"));
+         else if (!levelRootHere) lane.Add((u, "plan"));
+       }
+       if (lane.Count > 0) laneCandidates.Add((t, lane));
++      if (bench.Count > 0) benchCandidates.Add((t, bench));
+       if (roots.Count > 0) { candidates.Add((t, roots)); empty = 0; }
++      else if (bench.Count > 0) empty = 0;
+       else if (!any && candidates.Count + laneCandidates.Count > 0 && ++empty * opt.Step >= 3.0) break;
+     }
+ 
+     // track the branch from the outer end inward (it is well conditioned out there)
+-    List<(double T, double U, string Kind)> Track(List<(double T, List<(double U, string Kind)> Roots)> cands)
++    List<(double T, double U, string Kind)> Track(List<(double T, List<(double U, string Kind)> Roots)> cands, bool preferLevel = false)
+     {
+       var found = new List<(double T, double U, string Kind)>();
+       (double T, double U)? prev = null;
+@@ -303,8 +339,15 @@
+         else
+         {
+           var pu = prev.Value.U;
++          var gate = 0.05 + 0.3 * (prev.Value.T - t);
+           pick = roots.OrderBy(x => Math.Abs(x.U - pu)).First();
+-          if (Math.Abs(pick.U - pu) > 0.05 + 0.3 * (prev.Value.T - t)) continue;
++          // with bench division points in the list: a true meeting of the two sides wins wherever there is one within reach
++          if (preferLevel && pick.Kind == "plan")
++          {
++            var level = roots.Where(x => x.Kind != "plan" && Math.Abs(x.U - pu) <= gate).OrderBy(x => Math.Abs(x.U - pu)).ToList();
++            if (level.Count > 0) pick = level[0];
++          }
++          if (Math.Abs(pick.U - pu) > gate) continue;
+         }
+         found.Add((t, pick.U, pick.Kind)); prev = (t, pick.U);
+       }
+@@ -312,6 +355,25 @@
+       return found;
+     }
+     var path = Track(candidates);
++    if (path.Count(x => x.Kind == "exact") >= 2 && benchCandidates.Count > 0)
++    {
++      // Benches beyond the first slope: where both sides are on a flat link they meet in level nowhere useful (two benches
++      // 0.1 m apart in level at 4 % would put the line 2.5 m to one side), so there the sides are divided in plan, like a
++      // cut slope against a fill slope, and the line takes the mean level. The run from the apex to the first slope point
++      // (the lanes) stays the straight apex leg it always was.
++      var tFirst = path.First(x => x.Kind == "exact").T;
++      var merged = candidates.Select(x => (x.T, Roots: x.Roots.ToList())).ToList();
++      var added = false;
++      foreach (var (t, lane) in benchCandidates)
++      {
++        if (t <= tFirst) continue;
++        var plan = lane;
++        var at = merged.FindIndex(x => Math.Abs(x.T - t) < 1e-9);
++        if (at >= 0) merged[at].Roots.AddRange(plan); else merged.Add((t, plan));
++        added = true;
++      }
++      if (added) path = Track(merged.OrderBy(x => x.T).ToList(), preferLevel: true);
++    }
+     if (path.Count(x => x.Kind == "exact") < 2)
+     {
+       // No seam on matching slopes. That is what a change between cut and fill at the apex looks like: a cut slope and a fill
+@@ -344,7 +406,29 @@
+       return new SeamPoint(q.X, q.Y, z, t, u, a?.S ?? double.NaN, a?.O ?? double.NaN, b?.S ?? double.NaN, b?.O ?? double.NaN, kind);
+     }
+     r.SeamRaw.Add(new SeamPoint(apex.X, apex.Y, double.NaN, 0, 0, sApex, double.NaN, sApex, double.NaN, r.BendType == "curve" ? "curve_centre" : "pi"));
+-    foreach (var (t, u, kind) in path) r.SeamRaw.Add(Make(t, u, kind));
++    {
++      // Between march steps the line is straight in plan, but its level need not be: a bench edge or a drain crossed by the
++      // valley bends it. Points are added along the straight piece until the level between them is straight to 10 mm.
++      void Fill(SeamPoint a, SeamPoint b, int depth)
++      {
++        if (depth > 6 || double.IsNaN(a.Z) || double.IsNaN(b.Z) || b.T - a.T < 0.02) return;
++        var kind = a.Kind == "plan" || b.Kind == "plan" ? "plan" : b.Kind;
++        var mid = Make(0.5 * (a.T + b.T), 0.5 * (a.U + b.U), kind);
++        if (double.IsNaN(mid.Z)) return;
++        var bent = Math.Abs(mid.Z - 0.5 * (a.Z + b.Z)) > 0.01;
++        if (!bent && depth >= 2) return;                  // two levels are always looked at: a narrow drain can hide between the ends
++        Fill(a, mid, depth + 1);
++        if (bent) r.SeamRaw.Add(mid);
++        Fill(mid, b, depth + 1);
++      }
++      SeamPoint? before = null;
++      foreach (var (t, u, kind) in path)
++      {
++        var now = Make(t, u, kind);
++        if (before != null) Fill(before, now, 0);
++        r.SeamRaw.Add(now); before = now;
++      }
++    }
+ 
+     // ---------------------------------------------------------------- where the seam ends
+     // Walk out along it. It ends where it meets the ground (both sides daylight together there), or, failing that, where the
+@@ -357,6 +441,8 @@
+       {
+         if (ground == null) return null;
+         var a = Eval(q, true);
++        // an open-ended section crosses the ground on its way out to a terminal bench: that is not where it ends
++        if (a.HasValue && !sections.Extends(a.Value.S)) return null;
+         // only on the daylight slope: the lanes can sit right at ground level where the daylight changes between cut and fill
+         if (!a.HasValue || a.Value.O < sections.Hinge(a.Value.S)) return null;
+         var g = ground(q.X, q.Y);
+@@ -397,7 +483,7 @@
+       P2? end = r.Hit.HasValue ? new P2(r.Hit.Value.X, r.Hit.Value.Y) : null;
+       // ending by separation is only believed where there is a reason for it: a change between cut and fill in range, a
+       // lane-only seam, or no ground to test against. Otherwise a seam that misses the ground means the wrong surface or short templates.
+-      var maySeparate = !slopeSeam || ground == null || r.CutFillChanges.Count > 0;
++      var maySeparate = !slopeSeam || ground == null || r.CutFillChanges.Count > 0 || r.OpenEnded;
+       if (end == null && path[^1].Kind is "plan" or "lane" && lastOverlap.HasValue)
+       {
+         // these points exist only where the sides overlap, so the overlap ends within one step beyond the last of them
+diff -ru -x bin -x obj orig/bowtie-kernel/BowtieKernel/Sections.cs bowtie-kernel/BowtieKernel/Sections.cs
+--- orig/bowtie-kernel/BowtieKernel/Sections.cs	2026-09-21 08:34:41.491655308 +0800
++++ bowtie-kernel/BowtieKernel/Sections.cs	2026-09-21 07:54:09.718938089 +0800
+@@ -11,6 +11,10 @@
+   public double Z0;
+   public List<(double Off, double Dz)> Template = new();
+   public bool Clipped;
++  /// <summary>False when the chain does not end on the ground (a part that ends with a bench and a drain whatever the ground
++  /// does): there is then nothing to carry on past its last point, least of all along a drain wall. Set by the solver when it
++  /// has a ground surface; true by default, which is the behaviour of a daylight link.</summary>
++  public bool Extend = true;
+ 
+   public double StartOffset => Template[0].Off;
+   public double Reach => Template[^1].Off;
+@@ -41,6 +45,7 @@
+       var (o0, z0) = Template[i - 1]; var (o1, z1) = Template[i];
+       if (off <= o1) return o1 - o0 > 1e-9 ? z0 + (z1 - z0) * (off - o0) / (o1 - o0) : z1;
+     }
++    if (!Extend) return off <= Reach + 0.05 ? Template[^1].Dz : null;
+     if (Template.Count < 2 || off > Reach + extension) return null;
+     var (a0, b0) = Template[^2]; var (a1, b1) = Template[^1];
+     var slope = a1 - a0 > 1e-9 ? (b1 - b0) / (a1 - a0) : 0.0;
+@@ -104,12 +109,32 @@
+     return a.HasValue && b.HasValue ? (b.Value - a.Value) / (off + e - Math.Max(0, off - e)) : null;
+   }
+ 
++  /// <summary>Horizontal run of the link under (station, offset), from the nearer of the two sections next to the station.
++  /// The last link of a section that ends on the ground is its daylight link and counts as long, whatever its length.</summary>
++  public double LinkRun(double s, double off)
++  {
++    var (a, b, w) = Bracket(s);
++    var src = w > 0.5 ? b : a;
++    var t = src.Template;
++    for (var i = 1; i < t.Count; i++)
++      if (off <= t[i].Off || i == t.Count - 1)
++        return i == t.Count - 1 && src.Extend ? double.MaxValue : t[i].Off - t[i - 1].Off;
++    return double.MaxValue;
++  }
++
+   public double Reach(double s)
+   {
+     var (a, b, w) = Bracket(s);
+     return a.Reach + (b.Reach - a.Reach) * w;
+   }
+ 
++  /// <summary>False where either section next to this station is open ended (see SectionSample.Extend).</summary>
++  public bool Extends(double s)
++  {
++    var (a, b, _) = Bracket(s);
++    return a.Extend && b.Extend;
++  }
++
+   public double Hinge(double s)
+   {
+     var (a, b, w) = Bracket(s);
+diff -ru -x bin -x obj orig/bowtie-kernel/BowtieKernel/Snapshot.cs bowtie-kernel/BowtieKernel/Snapshot.cs
+--- orig/bowtie-kernel/BowtieKernel/Snapshot.cs	2026-09-21 08:34:41.491733554 +0800
++++ bowtie-kernel/BowtieKernel/Snapshot.cs	2026-09-21 07:52:11.624038610 +0800
+@@ -91,7 +91,7 @@
+     cap = r.Cap.Select(q => new[] { Math.Round(q.X, 4), Math.Round(q.Y, 4) }),
+     ground = r.Hit.HasValue ? new { x = Math.Round(r.Hit.Value.X, 4), y = Math.Round(r.Hit.Value.Y, 4), z = Math.Round(r.Hit.Value.Z, 4) } : null,
+     meetStations = new[] { r.MeetA, r.MeetB }, meetOffsets = new[] { r.MeetOffsetA, r.MeetOffsetB },
+-    seamEnd = r.SeamEnd, cutFillChanges = r.CutFillChanges.Select(x => Math.Round(x, 3)),
++    seamEnd = r.SeamEnd, openEnded = r.OpenEnded, cutFillChanges = r.CutFillChanges.Select(x => Math.Round(x, 3)),
+     clipFrom = r.ClipFrom, clipTo = r.ClipTo, capFrom = r.CapFrom, capTo = r.CapTo,
+     checks = new
+     {
+--- orig/bowtie-kernel/BowtieKernel.Tests/Program.cs	2026-09-21 08:34:41.491130948 +0800
++++ bowtie-kernel/BowtieKernel.Tests/Program.cs	2026-09-21 07:52:55.961422075 +0800
+@@ -113,9 +113,10 @@
+ if (args.Length >= 2 && args[0] == "solve")
+ {
+   var snap = Snapshot.Load(args[1]);
+-  var res = SeamSolver.Solve(snap.ToBaseline(), snap.ToSections(), snap.ToGround(), snap.BendFrom, snap.BendTo);
++  var res = SeamSolver.Solve(snap.ToBaseline(), snap.ToSections(), snap.ToGround(), snap.BendFrom, snap.BendTo, new SolveOptions { LevelFromTarget = args.Contains("--level") });
+   var json = Snapshot.ToJson(ResultReport.Of(res));
+   if (args.Length >= 3) File.WriteAllText(args[2], json); else Console.WriteLine(json);
++  if (args.Contains("--raw")) foreach (var q in res.SeamRaw) Console.WriteLine($"raw {q.Kind,-6} t={q.T:0.00} u={q.U:0.000} z={q.Z:0.000}  A {q.StationA:0.00}/{q.OffsetA:0.00}  B {q.StationB:0.00}/{q.OffsetB:0.00}");
+   return res.Status == SeamStatus.Ok ? 0 : 1;
+ }
+ 

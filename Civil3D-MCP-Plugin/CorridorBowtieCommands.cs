@@ -640,6 +640,7 @@ public static partial class CorridorBowtieCommands
     var frequency = PluginRuntime.GetOptionalDouble(parameters, "frequency");
     var assemblyName = PluginRuntime.GetOptionalString(parameters, "assemblyName");
     var matchParent = PluginRuntime.GetOptionalBool(parameters, "matchParent") ?? true;
+    var carrySurfaceTargets = PluginRuntime.GetOptionalBool(parameters, "carrySurfaceTargets") ?? true;
     var rebuild = PluginRuntime.GetOptionalBool(parameters, "rebuild") ?? true;
     var dryRun = PluginRuntime.GetOptionalBool(parameters, "dryRun") ?? false;
     var rangesNode = PluginRuntime.GetParameter(parameters, "ranges") as JsonArray
@@ -766,7 +767,45 @@ public static partial class CorridorBowtieCommands
           }
           var afterName = tail?.Name ?? "";
 
-          if (assemblyId.HasValue) mid.AssemblyId = assemblyId.Value;
+          var carried = new List<string>();
+          if (assemblyId.HasValue)
+          {
+            // A new assembly drops every target of the region. Its surface targets are given the parent's surface straight
+            // away, in this same transaction, so the region is never rebuilt with "Surface target is not specified".
+            ObjectIdCollection? parentSurfaces = null;
+            try
+            {
+              var parentInfos = region.GetTargets();
+              for (var ti = 0; ti < parentInfos.Count; ti++)
+                if (parentInfos[ti].TargetType == SubassemblyLogicalNameType.Surface && parentInfos[ti].TargetIds.Count > 0)
+                { parentSurfaces = parentInfos[ti].TargetIds; break; }
+            }
+            catch (Exception ex) { PluginLog.Debug("Bowtie", "Parent targets not readable", ex); }
+
+            mid.AssemblyId = assemblyId.Value;
+
+            if (carrySurfaceTargets && parentSurfaces != null)
+            {
+              try
+              {
+                var infos = mid.GetTargets();
+                for (var ti = 0; ti < infos.Count; ti++)
+                {
+                  if (infos[ti].TargetType != SubassemblyLogicalNameType.Surface || infos[ti].TargetIds.Count > 0) continue;
+                  var ids = new ObjectIdCollection();
+                  foreach (ObjectId id in parentSurfaces) ids.Add(id);
+                  infos[ti].TargetIds = ids;
+                  carried.Add($"{infos[ti].SubassemblyName}:{infos[ti].LogicalName}");
+                }
+                if (carried.Count > 0) mid.SetTargets(infos);
+              }
+              catch (Exception ex) when (ex is not JsonRpcDispatchException)
+              {
+                throw new JsonRpcDispatchException("CIVIL3D.API_ERROR",
+                  $"The assembly of region '{mid.Name}' was changed but its surface targets could not be set: {ex.GetType().Name}: {ex.Message}. The transaction was rolled back; nothing was changed.");
+              }
+            }
+          }
           if (frequency.HasValue) ApplyFrequency(mid, frequency.Value);
 
           names.Add((beforeName, mid.Name, afterName, parentName));
@@ -781,6 +820,7 @@ public static partial class CorridorBowtieCommands
             ["splitKeptFromParent"] = kept.Count > 0 ? kept : null,
             ["matchedToParent"] = matchParent,
             ["assemblyName"] = AssemblyName(transaction, SafeAssemblyId(mid)),
+            ["surfaceTargetsCarried"] = carried,
             ["frequency"] = ReadFrequency(mid),
           });
         }

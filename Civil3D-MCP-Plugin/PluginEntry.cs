@@ -57,7 +57,7 @@ public sealed class PluginEntry : IExtensionApplication
   /// that Civil 3D's own dialogs get; ExecuteInCommandContextAsync and application-context callbacks
   /// left the command context hanging or the objects half-registered on 2026.2.
   /// </summary>
-  [CommandMethod("C3DMCPRUNQUEUED", CommandFlags.Modal | CommandFlags.NoHistory)]
+  [CommandMethod("C3DMCPRUNQUEUED", CommandFlags.Modal | CommandFlags.NoHistory | CommandFlags.UsePickSet | CommandFlags.Redraw)] // UsePickSet + Redraw: keep the user's pickfirst selection, so selected_objects_info can see it
   public void RunQueuedCommand()
   {
     CivilExecution.RunQueuedWorkItem();

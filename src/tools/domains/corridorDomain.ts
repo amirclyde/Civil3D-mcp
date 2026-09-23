@@ -151,8 +151,10 @@ const CorridorTargetMappingGetArgsSchema = z.object({
 
 const CorridorTargetSchema = z.object({
   parameterName: z.string().describe("Subassembly target logical name or display name, e.g. 'TargetSurface' or 'Daylight Surface'. Use target_mapping_get to list them."),
-  targetType: z.enum(["surface", "alignment", "profile"]),
-  targetName: z.string(),
+  targetType: z.enum(["surface", "alignment", "profile", "feature_line"]).optional(),
+  targetName: z.string().optional().describe("Object name; a feature line can also be given as 'handle:1A2B'. Not needed with clear."),
+  clear: z.boolean().optional().describe("Empty this target (give parameterName, optionally subassemblyName). Clear a target BEFORE deleting the object mapped to it."),
+  targetNames: z.array(z.string()).optional().describe("Further objects of the same type on the same target (e.g. a bowtie seam and its cap on ClipTarget); Civil 3D picks one per section by targetToOption."),
   subassemblyName: z.string().optional().describe("Restrict the match to one subassembly instance in the region."),
   targetToOption: z.enum(["Nearest", "Farthest", "Flattest", "Steepest"]).optional(),
 });
@@ -161,6 +163,7 @@ const CorridorTargetMappingSetArgsSchema = z.object({
   action: z.literal("target_mapping_set"),
   name: z.string(),
   regionIndex: z.number().int().nonnegative().optional(),
+  regionName: z.string().optional(),
   baselineIndex: z.number().int().nonnegative().optional(),
   targets: z.array(CorridorTargetSchema),
   rebuild: z.boolean().optional(),
@@ -234,7 +237,8 @@ const CorridorFeatureLineExportArgsSchema = z.object({
 });
 
 const CorridorSurfaceBoundarySchema = z.object({
-  type: z.enum(["corridor_extents", "feature_line", "polyline", "points"]).optional().describe("Default corridor_extents (outer extents of the corridor)."),
+  type: z.enum(["corridor_extents", "outline", "feature_line", "polyline", "points"]).optional().describe("Default corridor_extents (outer extents of the corridor). outline = the plugin computes the outer edge from the built sections as a simple polygon (static; add again after a design change): use it where a bowtie was repaired with a valley line, since Civil 3D refuses corridor_extents there as a crossing polygon."),
+  baselineIndex: z.number().int().min(0).optional().describe("outline: baseline to outline (default 0)."),
   boundaryName: z.string().optional(),
   code: z.string().optional().describe("feature_line: corridor feature line code (e.g. Daylight, DrainTopOut_L)."),
   polylineHandle: z.string().optional().describe("polyline: handle of a closed polyline."),
@@ -363,6 +367,7 @@ const CorridorRegionIsolateArgsSchema = z.object({
   frequency: z.number().positive().optional(),
   assemblyName: z.string().optional(),
   matchParent: z.boolean().optional(),
+  carrySurfaceTargets: z.boolean().optional(),
   dryRun: z.boolean().optional(),
   rebuild: z.boolean().optional(),
 });
@@ -402,6 +407,45 @@ const CorridorBowtieValleyArgsSchema = z.object({
 
 const CorridorBowtieValleyPreviewArgsSchema = CorridorBowtieValleyArgsSchema.extend({
   action: z.literal("bowtie_valley_preview"),
+});
+
+const CorridorBowtieSeamArgsSchema = z.object({
+  action: z.literal("bowtie_seam"),
+  name: z.string(),
+  baselineIndex: z.number().int().nonnegative().optional(),
+  startStation: z.number(),
+  endStation: z.number(),
+  side: z.enum(["left", "right"]).optional(),
+  linkCode: z.string().optional(),
+  surfaceName: z.string().optional(),
+  extension: z.number().nonnegative().optional(),
+  step: z.number().positive().max(1).optional(),
+  capInset: z.number().positive().max(1).optional(),
+  searchMargin: z.number().min(5).optional(),
+  maxLevelStep: z.number().nonnegative().optional(),
+  addStations: z.boolean().optional(),
+  seamName: z.string().optional(),
+  capName: z.string().optional(),
+  style: z.string().optional(),
+  layer: z.string().optional(),
+  snapshotPath: z.string().optional(),
+  allStations: z.boolean().optional(),
+  writeAs: z.enum(["feature_line", "alignment"]).optional(),
+  levelFromTarget: z.boolean().optional(),
+  maxLevelAdjust: z.number().nonnegative().optional(),
+  dryRun: z.boolean().optional(),
+});
+
+const CorridorBowtieSeamPreviewArgsSchema = CorridorBowtieSeamArgsSchema.extend({
+  action: z.literal("bowtie_seam_preview"),
+});
+
+const CorridorBowtieFixArgsSchema = CorridorBowtieSeamArgsSchema.extend({
+  action: z.literal("bowtie_fix"),
+  assemblyName: z.string().optional(),
+  subassemblyName: z.string().optional(),
+  regionName: z.string().optional(),
+  padding: z.number().nonnegative().optional(),
 });
 
 const CorridorBowtieRefreshArgsSchema = z.object({
@@ -477,6 +521,8 @@ const canonicalCorridorInputShape = {
     "region_merge",
     "bowtie_predict",
     "bowtie_valley",
+    "bowtie_seam",
+    "bowtie_fix",
     "bowtie_refresh",
     "bowtie_check",
     "region_stations",
@@ -494,7 +540,7 @@ const canonicalCorridorInputShape = {
   linkCodes: z.array(CorridorLinkCodeSchema).optional().describe("surface_create / add_link_code: link codes (string or {code, breakline})."),
   featureLineCodes: z.array(z.string()).optional(),
   overhangCorrection: z.enum(["none", "top_links", "bottom_links"]).optional(),
-  boundaries: z.array(CorridorSurfaceBoundarySchema).optional().describe("surface_create: boundaries; default none (add a corridor_extents boundary for a clean surface)."),
+  boundaries: z.array(CorridorSurfaceBoundarySchema).optional().describe("surface_create: boundaries; default none (add a corridor_extents boundary for a clean surface, or outline where bowties were repaired with valley lines)."),
   boundary: CorridorSurfaceBoundarySchema.optional().describe("surface_edit add_boundary."),
   boundaryName: z.string().optional(),
   operation: z.string().optional().describe("surface_edit: add_link_code | remove_link_code | set_breakline | add_feature_line_code | remove_feature_line_code | set_overhang | add_boundary | remove_boundary | set_style | rename | set_description | set_build. region_stations: list | delete | clear (the region's added stations)."),
@@ -526,7 +572,7 @@ const canonicalCorridorInputShape = {
   featureLineName: z.string().optional().describe("create: use a feature line as the baseline instead of alignment + profile (stations run 0 to its length)."),
   featureLineHandle: z.string().optional().describe("create: feature line by AutoCAD handle, for unnamed or duplicate-named feature lines."),
   baselineName: z.string().optional(),
-  regionName: z.string().optional().describe("region_stations: the region (or regionIndex). bowtie_refresh: only this region (default: every region whose ClipTarget is mapped to an alignment)."),
+  regionName: z.string().optional().describe("region_stations / target_mapping_set: the region (or regionIndex); an unknown name is refused. bowtie_refresh: only this region (default: every region whose ClipTarget is mapped to an alignment)."),
   corridorSurface: z.string().optional(),
   referenceSurface: z.string().optional(),
   regionIndex: z.number().int().nonnegative().optional(),
@@ -543,12 +589,14 @@ const canonicalCorridorInputShape = {
   leftWidth: z.number().positive().optional(),
   rightWidth: z.number().positive().optional(),
   sampleStep: z.number().positive().optional().describe("bowtie_predict: sampling step along the baseline (default length/4000, 0.1-0.5 m)."),
-  padding: z.number().nonnegative().optional().describe("bowtie_predict: metres added before/after each bowtie in the split plan (default 1)."),
+  padding: z.number().nonnegative().optional().describe("bowtie_predict: metres added before/after each bowtie in the split plan (default 1). bowtie_fix: metres of region kept either side of the meet stations (default 2)."),
+  subassemblyName: z.string().optional().describe("bowtie_fix: the clip subassembly on the INSIDE of the bend (the one that gets ClipTarget / ClipElev). Default: the only subassembly of the region with a ClipTarget whose name ends in L/Left or R/Right to match side."),
   mergeGap: z.number().nonnegative().optional().describe("bowtie_predict: merge split ranges closer than this (default 2 m)."),
   maxLoopLength: z.number().positive().optional().describe("bowtie_predict: ignore self-crossings longer than this along the baseline (hairpins, default 200 m)."),
   includeEdges: z.boolean().optional().describe("bowtie_predict: return the predicted inside-edge points around each bowtie."),
   ranges: z.array(CorridorStationRangeSchema).optional().describe("region_isolate: station ranges to give their own region - pass bowtie_predict's splitPlan."),
   namePrefix: z.string().optional().describe("region_isolate: name prefix for isolated regions (default BT)."),
+  carrySurfaceTargets: z.boolean().optional().describe("region_isolate with assemblyName: give the new assembly's surface targets the parent region's surface in the same step (default true), so no rebuild ever runs with a surface target missing."),
   matchParent: z.boolean().optional().describe("region_split / region_isolate: copy the parent's assembly, targets and frequency onto the new pieces (default true)."),
   dryRun: z.boolean().optional().describe("region_isolate: report the splits without changing the corridor. bowtie_valley / bowtie_refresh: compute and check without changing anything (read-only, needs no approval)."),
   firstRegionIndex: z.number().int().nonnegative().optional().describe("region_merge: first region of the range to merge."),
@@ -567,6 +615,16 @@ const canonicalCorridorInputShape = {
   rebuildFirst: z.boolean().optional().describe("bowtie_refresh: rebuild the corridor before reading its sections (default true; dry runs never rebuild)."),
   clipInset: z.number().nonnegative().max(5).optional().describe("bowtie_valley / bowtie_refresh, curved bends only: how far short of the curve's centre of curvature the inside sections stop, in metres (default 2 % of the radius, clamped to 0.05-0.5 m)."),
   stations: z.array(z.number()).optional().describe("region_stations delete: added stations to remove."),
+  capInset: z.number().positive().max(1).optional().describe("bowtie_seam: how far short of the curve centre the converging (arc) sections stop (default 0.05 m)."),
+  searchMargin: z.number().min(5).optional().describe("bowtie_seam: metres of baseline and sections read either side of the bend (default 60)."),
+  maxLevelStep: z.number().nonnegative().optional().describe("bowtie_seam: largest step in level accepted where a cut slope and a fill slope cover the same ground (default 0.30 m); above it the bend is a design conflict."),
+  seamName: z.string().optional().describe("bowtie_seam: name of the valley line (default '<corridor> <region> Valley L|R')."),
+  capName: z.string().optional().describe("bowtie_seam: name of the apex bar on a curve (default '<corridor> <region> Apex L|R')."),
+  snapshotPath: z.string().optional().describe("bowtie_seam: also write the snapshot (baseline samples, unclipped sections, ground grid) to this .json file, to solve offline with bowtie-kernel."),
+  allStations: z.boolean().optional().describe("bowtie_seam: list every section in the result, not only the clipped ones."),
+  levelFromTarget: z.boolean().optional().describe("bowtie_seam: the clip subassembly (UTNM_LaneDaylightClip v0.3, target ClipElev) also takes its level from the valley line, the mean of the two sides, so both sides end on the same XYZ (default true with feature lines)."),
+  maxLevelAdjust: z.number().nonnegative().optional().describe("bowtie_seam with levelFromTarget: largest distance a link may be moved off its own slope (default 0.30 m); above it the bend is a design conflict."),
+  writeAs: z.enum(["feature_line", "alignment"]).optional().describe("bowtie_seam: write the valley line and the apex bar as siteless feature lines carrying their levels (default) or as alignments."),
 };
 
 // ─── Domain definition ────────────────────────────────────────────────────────
@@ -580,7 +638,7 @@ type CorridorRawArgs = Record<string, unknown>;
  */
 function resolveCorridorAction(rawArgs: CorridorRawArgs): { action: string; args: CorridorRawArgs } {
   const action = String(rawArgs.action ?? "");
-  if ((action === "bowtie_valley" || action === "bowtie_refresh") && rawArgs.dryRun === true) {
+  if ((action === "bowtie_valley" || action === "bowtie_refresh" || action === "bowtie_seam") && rawArgs.dryRun === true) {
     const preview = `${action}_preview`;
     return { action: preview, args: { ...rawArgs, action: preview } };
   }
@@ -589,6 +647,34 @@ function resolveCorridorAction(rawArgs: CorridorRawArgs): { action: string; args
     return { action: "region_stations_list", args: { ...rest, action: "region_stations_list" } };
   }
   return { action, args: rawArgs };
+}
+
+function bowtieSeamParams(args: CorridorRawArgs, dryRun: boolean) {
+  return {
+    corridorName: args.name,
+    baselineIndex: args.baselineIndex ?? 0,
+    startStation: args.startStation,
+    endStation: args.endStation,
+    side: args.side ?? null,
+    linkCode: args.linkCode ?? null,
+    surfaceName: args.surfaceName ?? null,
+    extension: args.extension ?? null,
+    step: args.step ?? null,
+    capInset: args.capInset ?? null,
+    searchMargin: args.searchMargin ?? null,
+    maxLevelStep: args.maxLevelStep ?? null,
+    addStations: args.addStations ?? true,
+    seamName: args.seamName ?? null,
+    capName: args.capName ?? null,
+    style: args.style ?? null,
+    layer: args.layer ?? null,
+    snapshotPath: args.snapshotPath ?? null,
+    allStations: args.allStations ?? false,
+    writeAs: args.writeAs ?? null,
+    levelFromTarget: args.levelFromTarget ?? null,
+    maxLevelAdjust: args.maxLevelAdjust ?? null,
+    dryRun,
+  };
 }
 
 function bowtieRefreshParams(args: CorridorRawArgs, dryRun: boolean) {
@@ -812,7 +898,8 @@ export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
       execute: async (args) => await withApplicationConnection(
         async (appClient) => await appClient.sendCommand("setCorridorTargetMappings", {
           corridorName: args.name,
-          regionIndex: args.regionIndex ?? 0,
+          regionIndex: args.regionIndex,
+          regionName: args.regionName,
           baselineIndex: args.baselineIndex ?? 0,
           targets: args.targets,
           rebuild: args.rebuild ?? true,
@@ -1100,6 +1187,7 @@ export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
           frequency: args.frequency ?? null,
           assemblyName: args.assemblyName ?? null,
           matchParent: args.matchParent ?? true,
+          carrySurfaceTargets: args.carrySurfaceTargets ?? true,
           dryRun: args.dryRun ?? false,
           rebuild: args.rebuild ?? true,
         }),
@@ -1187,6 +1275,117 @@ export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
           allowMismatch: args.allowMismatch ?? false,
           clipInset: args.clipInset ?? null,
         }),
+      ),
+    },
+    // The seam (valley) of one bend from the tested bowtie kernel: angle points and curves, cut, fill and changes between them.
+    bowtie_seam: {
+      action: "bowtie_seam",
+      inputSchema: CorridorBowtieSeamArgsSchema,
+      responseSchema: GenericCorridorResponseSchema,
+      capabilities: ["edit"],
+      requiresActiveDrawing: true,
+      safeForRetry: false,
+      pluginMethods: ["bowtieSeam"],
+      execute: async (args) => await withApplicationConnection(
+        async (appClient) => await appClient.sendCommand("bowtieSeam", bowtieSeamParams(args, args.dryRun === true)),
+      ),
+    },
+    // One step for one bend: solve, give the clash range its own region (optionally with a clip assembly, surface targets
+    // carried over in the same transaction), write the valley lines, map ClipTarget + ClipElev, rebuild, check.
+    bowtie_fix: {
+      action: "bowtie_fix",
+      inputSchema: CorridorBowtieFixArgsSchema,
+      responseSchema: GenericCorridorResponseSchema,
+      capabilities: ["edit"],
+      requiresActiveDrawing: true,
+      safeForRetry: false,
+      pluginMethods: ["bowtieSeam", "isolateCorridorRanges", "getCorridorTargetMappings", "setCorridorTargetMappings", "checkCorridorBowties"],
+      execute: async (args) => await withApplicationConnection(async (appClient) => {
+        const stages: Record<string, unknown> = {};
+        const done = (stage: string, ok: boolean, message: string) => ({ corridorName: args.name, ok, stoppedAt: ok ? null : stage, message, stages });
+        const side = String(args.side ?? "");
+        if (side !== "left" && side !== "right") return done("input", false, "bowtie_fix needs side: left or right (the inside of the bend). Nothing was changed.");
+
+        // 1. solve on the sections as built (read-only)
+        const preview = await appClient.sendCommand("bowtieSeam", bowtieSeamParams({ ...args, snapshotPath: null }, true)) as any;
+        stages.preview = { status: preview?.result?.status, blocking: preview?.blocking, meetStations: preview?.result?.meetStations, region: preview?.region, checks: preview?.result?.checks };
+        if (preview?.result?.status !== "Ok" || (preview?.blocking ?? []).length > 0)
+          return done("preview", false, "The bend cannot be fixed as it stands (see stages.preview). Nothing was changed.");
+        const meet = (preview.result.meetStations ?? []) as number[];
+        if (meet.length !== 2) return done("preview", false, "The solver gave no meet stations. Nothing was changed.");
+        const pad = Number(args.padding ?? 2);
+        const region = preview.region as { name: string; start: number; end: number };
+        const from = Math.max(region.start, Math.floor(meet[0] - pad));
+        const to = Math.min(region.end, Math.ceil(meet[1] + pad));
+
+        // 2. own region for the clash range; a different assembly gets the parent's surface targets in the same transaction
+        const swapping = typeof args.assemblyName === "string" && args.assemblyName.length > 0;
+        const alreadyIsolated = Math.abs(region.start - from) < 0.011 && Math.abs(region.end - to) < 0.011;
+        let regionName = region.name;
+        if (!alreadyIsolated || swapping) {
+          const isolated = await appClient.sendCommand("isolateCorridorRanges", {
+            corridorName: args.name, baselineIndex: args.baselineIndex ?? 0,
+            ranges: [{ startStation: from, endStation: to, ...(args.regionName ? { name: args.regionName } : {}) }],
+            namePrefix: "BT", frequency: null, assemblyName: swapping ? args.assemblyName : null,
+            matchParent: true, carrySurfaceTargets: true, dryRun: false, rebuild: swapping,
+          }) as any;
+          stages.isolate = { isolated: isolated?.isolated, rebuilt: isolated?.rebuilt, rebuildError: isolated?.rebuildError, undo: isolated?.undo };
+          regionName = isolated?.isolated?.[0]?.name ?? regionName;
+          if (isolated?.rebuildError) return done("isolate", false, `The region was isolated but the rebuild failed: ${isolated.rebuildError}`);
+        }
+
+        // 3. the inside clip subassembly
+        const mapping = await appClient.sendCommand("getCorridorTargetMappings", { corridorName: args.name, regionIndex: null, baselineIndex: args.baselineIndex ?? 0 }) as any;
+        const reg = (mapping?.regions ?? []).find((r: any) => r.regionName === regionName);
+        const clipSubs = [...new Set(((reg?.targets ?? []) as any[]).filter((t) => t.parameterName === "ClipTarget").map((t) => String(t.subassemblyName)))];
+        const sideRe = side === "left" ? /(^|[\s_\-])(l|left)$/i : /(^|[\s_\-])(r|right)$/i;
+        const sub = typeof args.subassemblyName === "string" && args.subassemblyName.length > 0
+          ? args.subassemblyName
+          : (clipSubs.filter((n) => sideRe.test(n)).length === 1 ? clipSubs.filter((n) => sideRe.test(n))[0] : null);
+        stages.clipSubassemblies = clipSubs;
+        if (!sub || !clipSubs.includes(sub))
+          return done("subassembly", false, `Region '${regionName}' has no unambiguous clip subassembly for the ${side} side (found: ${clipSubs.join(", ") || "none with a ClipTarget"}). Pass subassemblyName, or assemblyName for an assembly that has one. The region split stays; nothing else was changed.`);
+        const hasElev = ((reg?.targets ?? []) as any[]).some((t) => t.parameterName === "ClipElev" && t.subassemblyName === sub);
+
+        // 4. the valley lines (after a swap: solved again on the clip assembly's own, still unclipped, sections)
+        const seam = await appClient.sendCommand("bowtieSeam", bowtieSeamParams({ ...args, levelFromTarget: args.levelFromTarget ?? hasElev }, false)) as any;
+        stages.seam = { status: seam?.result?.status, blocking: seam?.blocking, written: seam?.written, stationsAdded: seam?.stationsAdded, checks: seam?.result?.checks, warnings: seam?.warnings };
+        const written = (seam?.written ?? []) as any[];
+        if (written.length === 0) return done("seam", false, "No valley line was written (see stages.seam). The region split stays; no target was mapped.");
+        const names = written.map((w) => String(w.name));
+        const kind = written[0].type === "alignment" ? "alignment" : "feature_line";
+
+        // 5. map and rebuild once
+        const targets: any[] = [{ parameterName: "ClipTarget", subassemblyName: sub, targetType: kind, targetName: names[0], targetNames: names.slice(1), targetToOption: "Nearest" }];
+        if (hasElev && kind === "feature_line")
+          targets.push({ parameterName: "ClipElev", subassemblyName: sub, targetType: kind, targetName: names[0], targetNames: names.slice(1), targetToOption: "Nearest" });
+        const mapped = await appClient.sendCommand("setCorridorTargetMappings", { corridorName: args.name, regionName, baselineIndex: args.baselineIndex ?? 0, targets, rebuild: true }) as any;
+        stages.map = { region: regionName, subassembly: sub, applied: mapped?.applied, rebuilt: mapped?.rebuilt, rebuildError: mapped?.rebuildError };
+        if (mapped?.rebuildError) return done("map", false, `Targets were mapped but the rebuild failed: ${mapped.rebuildError}`);
+
+        // 6. verify on the built corridor
+        const check = await appClient.sendCommand("checkCorridorBowties", {
+          corridorName: args.name, baselineIndex: args.baselineIndex ?? 0, side, startStation: from - 5, endStation: to + 5,
+          linkCode: args.linkCode ?? null, minOffset: null, code: null, tolerance: null, maxListed: null,
+        }) as any;
+        stages.check = check;
+        const clean = check?.clean === true;
+        return done("check", clean, clean
+          ? `Bend ${from}-${to} (${side}) repaired in region '${regionName}': no link crossings, no daylight loops.`
+          : "The repair was applied but the built corridor still shows crossings (see stages.check).");
+      }),
+    },
+    // bowtie_seam with dryRun: true resolves here - read-only, so no approval.
+    bowtie_seam_preview: {
+      action: "bowtie_seam_preview",
+      inputSchema: CorridorBowtieSeamPreviewArgsSchema,
+      responseSchema: GenericCorridorResponseSchema,
+      capabilities: ["query", "analyze"],
+      requiresActiveDrawing: true,
+      safeForRetry: true,
+      pluginMethods: ["bowtieSeam"],
+      execute: async (args) => await withApplicationConnection(
+        async (appClient) => await appClient.sendCommand("bowtieSeam", bowtieSeamParams(args, true)),
       ),
     },
     bowtie_refresh: {
@@ -1283,7 +1482,7 @@ export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
     {
       toolName: "civil3d_corridor",
       displayName: "Civil 3D Corridor",
-      description: "Creates and reads Civil 3D corridors (create = assembly on an alignment + profile, or on a feature line, one baseline and region), controls rebuild, computes volumes, manages regions (add, split, isolate station ranges, merge, delete), predicts bowties (bowtie_predict: where the inside edge runs backwards or crosses itself, with a split plan), builds the valley line of a bend as a clip target (bowtie_valley; refuses bends whose legs differ or whose valley meets the ground on the wrong side or outside the region) and refreshes every mapped valley after a design change (bowtie_refresh), verifies the built result (bowtie_check: link crossings and feature-line loops), lists or removes a region's added stations (region_stations); dry runs and listings need no approval, assembly frequency and subassembly target mappings, builds corridor surfaces (link/feature-line codes, overhang correction, boundaries) and extracts corridor solids through a single domain tool.",
+      description: "Creates and reads Civil 3D corridors (create = assembly on an alignment + profile, or on a feature line, one baseline and region), controls rebuild, computes volumes, manages regions (add, split, isolate station ranges, merge, delete), predicts bowties (bowtie_predict: where the inside edge runs backwards or crosses itself, with a split plan), builds the valley line of a bend as a clip target (bowtie_valley; refuses bends whose legs differ or whose valley meets the ground on the wrong side or outside the region) and refreshes every mapped valley after a design change (bowtie_refresh), repairs one bend in one step (bowtie_fix: solve, isolate the clash range with an optional clip assembly whose surface targets are carried over, write the valley lines, map ClipTarget + ClipElev, rebuild, check), verifies the built result (bowtie_check: link crossings and feature-line loops), lists or removes a region's added stations (region_stations); dry runs and listings need no approval, assembly frequency and subassembly target mappings, builds corridor surfaces (link/feature-line codes, overhang correction, boundaries) and extracts corridor solids through a single domain tool.",
       inputShape: canonicalCorridorInputShape,
       supportedActions: [
         "list",
@@ -1305,6 +1504,9 @@ export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
         "bowtie_predict",
         "bowtie_valley",
         "bowtie_valley_preview",
+        "bowtie_seam",
+        "bowtie_seam_preview",
+        "bowtie_fix",
         "bowtie_refresh",
         "bowtie_refresh_preview",
         "bowtie_check",

@@ -20,18 +20,23 @@ Behaviour:
     ON ITS OWN SLOPE and ends in a point coded "Valley" (link codes gain "Clip"). No target, or target not crossed,
     gives the unclipped geometry.
 
+  * Clip level (optional elevation target "ClipElev", v0.3): map the SAME valley feature line(s) here as on ClipTarget.
+    Where both are found, the clipped link ends at the clip offset AT THE FEATURE LINE'S LEVEL instead of on its own slope,
+    so the two sides of a bend, and every section converging on a curve centre, end on the same XYZ and the surface is
+    continuous. Only the last link changes slope. Without ClipElev the v0.2 behaviour is unchanged.
+
 Link codes follow LinkWidthAndSlope / DaylightBench: lane Top/Datum, slope links before a bench
 Top/Daylight/Slope_Link/Datum, bench links Top/Bench/Datum, the final daylight link Top/Daylight/Daylight_Cut|Fill/Datum.
 """
 import os, sys, uuid, zipfile
 
 NAME = "UTNM_LaneDaylightClip"
-VERSION = "0.2"
+VERSION = "0.3"
 MAX_SEGMENTS = 4
 DESCRIPTION = ("UTNM optional lane + daylight with benches (LinkWidthAndSlope + DaylightBench behaviour) plus an "
                "optional clip offset target for bowtie fixes: where the ClipTarget is crossed, the lane, slope or bench "
-               "stops on its own slope at the clip line and ends in point code Valley. Without a target it behaves like "
-               "the stock parts.")
+               "stops at the clip line and ends in point code Valley: on its own slope, or at the level of the optional "
+               "ClipElev elevation target (map the same valley feature line on both). Without a target it behaves like the stock parts.")
 GUID = uuid.uuid4().hex
 OUT_DIR = sys.argv[1] if len(sys.argv) > 1 else "."
 
@@ -260,10 +265,17 @@ class Ctx:
         self.cutfill_code = ("expr", f'If({self.cut}, "Daylight_Cut", "Daylight_Fill")')
 
 
+def clip_dy(frm, slope_expr, dx_expr):
+    """Rise of the clipped link: up to the ClipElev level where that target is found, else along the link's own slope."""
+    # .Elevation is the point's real level (as .Offset is its real offset); .X / .Y are relative to the subassembly origin
+    return f"If(ClipElev.IsValid, ClipElev.Elevation - {frm}.Elevation, ({slope_expr}) * ({dx_expr}))"
+
+
 def clipped_end(frm, slope_expr, link_codes):
-    """Point on the current link at the clip offset + the link to it. Returns a chain node."""
+    """Point at the clip offset (on the link's own slope, or at the ClipElev level) + the link to it. Returns a chain node."""
     v = Names.P()
-    return chain(point(v, "SlopeAndDeltaX", frm, ["Valley"], slope=f"[{slope_expr}]", dx=f"[{CLIPD} - {dist(frm)}]"),
+    dx = f"{CLIPD} - {dist(frm)}"
+    return chain(point(v, "DeltaXAndDeltaY", frm, ["Valley"], dx=f"[{dx}]", dy=f"[{clip_dy(frm, slope_expr, dx)}]"),
                  link(Names.L(), frm, v, link_codes), None)
 
 
@@ -327,7 +339,7 @@ def build_tree():
     lv, le = Names.P(), Names.P()
     lane = Decision(
         f"ClipTarget.IsValid AndAlso {CLIPD} < LaneWidth - 0.0001",
-        true=chain(point(lv, "SlopeAndDeltaX", "P1", ["Valley"], slope="[LaneSlope * 1.0]", dx=f"[{CLIPD}]"),
+        true=chain(point(lv, "DeltaXAndDeltaY", "P1", ["Valley"], dx=f"[{CLIPD}]", dy=f"[{clip_dy('P1', 'LaneSlope * 1.0', CLIPD)}]"),
                    link(Names.L(), "P1", lv, ["Top", "Datum", "Clip"]), None),
         false=chain(point(le, "SlopeAndDeltaX", "P1", ["P2"], slope="[LaneSlope * 1.0]", dx="[LaneWidth]"),
                     link(Names.L(), "P1", le, ["Top", "Datum"]),
@@ -353,7 +365,8 @@ def build_xaml():
         else:
             defaults += f' this:Subassembly.{name}="{default}"'
     defaults += (' this:Subassembly.SurfaceTarget="[new PreviewSurfaceTarget(&quot;SurfaceTarget&quot;, True, 1000, 2, -1000, 2)]"'
-                 ' this:Subassembly.ClipTarget="[new PreviewOffsetTarget(&quot;ClipTarget&quot;, False, 6)]"')
+                 ' this:Subassembly.ClipTarget="[new PreviewOffsetTarget(&quot;ClipTarget&quot;, False, 6)]"'
+                 ' this:Subassembly.ClipElev="[new PreviewElevationTarget(&quot;ClipElev&quot;, False, 1)]"')
 
     members = [
         '    <x:Property Name="Geometry" Type="InOutArgument(asw:Geometry)" />',
@@ -373,7 +386,8 @@ def build_xaml():
             f'      </x:Property.Attributes>\n'
             f'    </x:Property>')
     for name, typ, display in (("SurfaceTarget", "asw:SurfaceTarget", "Daylight Surface"),
-                               ("ClipTarget", "asw:OffsetTarget", "Clip Offset Target")):
+                               ("ClipTarget", "asw:OffsetTarget", "Clip Offset Target"),
+                               ("ClipElev", "asw:ElevationTarget", "Clip Level Target")):
         members.append(
             f'    <x:Property Name="{name}" Type="InArgument({typ})">\n'
             f'      <x:Property.Attributes>\n'

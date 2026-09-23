@@ -178,7 +178,9 @@ public static class CorridorEditingCommands
   public static Task<object?> SetCorridorTargetMappingsAsync(JsonObject? parameters)
   {
     var corridorName = PluginRuntime.GetRequiredString(parameters, "corridorName");
-    var regionIndex = PluginRuntime.GetOptionalInt(parameters, "regionIndex") ?? 0;
+    var regionIndexGiven = PluginRuntime.GetOptionalInt(parameters, "regionIndex");
+    var regionNameGiven = PluginRuntime.GetOptionalString(parameters, "regionName");
+    var regionIndex = regionIndexGiven ?? 0;
     var baselineIndex = PluginRuntime.GetOptionalInt(parameters, "baselineIndex") ?? 0;
     var rebuild = PluginRuntime.GetOptionalBool(parameters, "rebuild") ?? true;
     var targetsNode = PluginRuntime.GetParameter(parameters, "targets") as JsonArray
@@ -188,6 +190,18 @@ public static class CorridorEditingCommands
     {
       var corridor = CivilObjectUtils.FindCorridorByName(civilDoc, transaction, corridorName, OpenMode.ForWrite);
       var baseline = GetBaseline(corridor, baselineIndex);
+      if (!string.IsNullOrWhiteSpace(regionNameGiven))
+      {
+        // a region named by the caller must never silently fall back to region 0
+        var byName = -1;
+        for (var ri = 0; ri < baseline.BaselineRegions.Count; ri++)
+          if (string.Equals(baseline.BaselineRegions[ri].Name, regionNameGiven, StringComparison.OrdinalIgnoreCase)) { byName = ri; break; }
+        if (byName < 0)
+          throw new JsonRpcDispatchException("CIVIL3D.NOT_FOUND", $"Corridor '{corridorName}' baseline {baselineIndex} has no region named '{regionNameGiven}'. Nothing was changed.");
+        if (regionIndexGiven.HasValue && regionIndexGiven.Value != byName)
+          throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", $"regionName '{regionNameGiven}' is region {byName}, but regionIndex {regionIndexGiven.Value} was also given. Nothing was changed.");
+        regionIndex = byName;
+      }
       if (regionIndex < 0 || regionIndex >= baseline.BaselineRegions.Count)
         throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT",
           $"Region index {regionIndex} is out of range. Corridor '{corridorName}' baseline {baselineIndex} has {baseline.BaselineRegions.Count} region(s).");
@@ -204,12 +218,45 @@ public static class CorridorEditingCommands
         var targetName = t["targetName"]?.GetValue<string>();
         var subassemblyName = t["subassemblyName"]?.GetValue<string>();
         var targetToOption = t["targetToOption"]?.GetValue<string>();
+        // clear: true empties the target (the subassembly then behaves as if nothing were mapped). Do this BEFORE deleting an
+        // object that is mapped as a target: deleting a mapped target left a corridor with empty sections (20 Sep 2026).
+        var clear = t["clear"]?.GetValue<bool>() ?? false;
+        if (clear)
+        {
+          if (string.IsNullOrWhiteSpace(paramName))
+            throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "clear needs parameterName (and optionally subassemblyName). Nothing was changed.");
+          var cleared = 0;
+          for (var i = 0; i < targetInfos.Count; i++)
+          {
+            var info = targetInfos[i];
+            if (!string.IsNullOrWhiteSpace(subassemblyName) && !string.Equals(info.SubassemblyName, subassemblyName, StringComparison.OrdinalIgnoreCase)) continue;
+            if (!string.Equals(info.LogicalName, paramName, StringComparison.OrdinalIgnoreCase) && !string.Equals(info.DisplayName, paramName, StringComparison.OrdinalIgnoreCase)) continue;
+            info.TargetIds = new ObjectIdCollection();
+            cleared++;
+            applied.Add(new Dictionary<string, object?> { ["subassemblyName"] = info.SubassemblyName, ["parameterName"] = info.LogicalName, ["cleared"] = true });
+          }
+          if (cleared == 0)
+            throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", $"No subassembly target named '{paramName}' in region '{region.Name}'. Nothing was changed.");
+          continue;
+        }
         if (string.IsNullOrWhiteSpace(paramName) || string.IsNullOrWhiteSpace(targetType) || string.IsNullOrWhiteSpace(targetName))
-          throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "Each target needs parameterName, targetType and targetName. Nothing was changed.");
+          throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "Each target needs parameterName, targetType and targetName (or parameterName and clear: true). Nothing was changed.");
 
         var targetId = ResolveTargetObjectId(civilDoc, transaction, targetType, targetName)
           ?? throw new JsonRpcDispatchException("CIVIL3D.OBJECT_NOT_FOUND",
             $"Target object '{targetName}' of type '{targetType}' was not found. Nothing was changed.");
+        // targetNames: further objects of the same type on the same target (Civil 3D then picks one per section by targetToOption)
+        var targetIdList = new List<ObjectId> { targetId };
+        var allTargetNames = new List<string> { targetName! };
+        if (t["targetNames"] is JsonArray more)
+          foreach (var node in more)
+          {
+            var extra = node?.GetValue<string>();
+            if (string.IsNullOrWhiteSpace(extra) || allTargetNames.Contains(extra!, StringComparer.OrdinalIgnoreCase)) continue;
+            targetIdList.Add(ResolveTargetObjectId(civilDoc, transaction, targetType, extra!)
+              ?? throw new JsonRpcDispatchException("CIVIL3D.OBJECT_NOT_FOUND", $"Target object '{extra}' of type '{targetType}' was not found. Nothing was changed."));
+            allTargetNames.Add(extra!);
+          }
 
         var matches = new List<SubassemblyTargetInfo>();
         for (var i = 0; i < targetInfos.Count; i++)
@@ -236,13 +283,18 @@ public static class CorridorEditingCommands
         foreach (var info in matches)
         {
           ValidateTargetKind(info, targetType);
-          info.TargetIds = new ObjectIdCollection { targetId };
+          var idCollection = new ObjectIdCollection();
+          foreach (var tid in targetIdList) idCollection.Add(tid);
+          info.TargetIds = idCollection;
           if (!string.IsNullOrWhiteSpace(targetToOption))
           {
             if (!Enum.TryParse<SubassemblyTargetToOption>(targetToOption, ignoreCase: true, out var option))
               throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT",
                 $"targetToOption '{targetToOption}' is not one of {string.Join(", ", Enum.GetNames<SubassemblyTargetToOption>())}.");
-            info.TargetToOption = option;
+            // Civil 3D refuses the option on a target with a single object ("The count of TargetIds should be greater or equal
+            // to 2"): with one object there is nothing to choose between, so the option is simply not set (an angle point's valley
+            // has no apex bar, so its ClipTarget holds one line).
+            if (idCollection.Count >= 2) info.TargetToOption = option;
           }
           applied.Add(new Dictionary<string, object?>
           {
@@ -250,6 +302,8 @@ public static class CorridorEditingCommands
             ["parameterName"] = info.LogicalName,
             ["targetType"] = info.TargetType.ToString(),
             ["targetName"] = targetName,
+            ["targetNames"] = allTargetNames,
+            ["targetToOption"] = SafeTargetToOption(info),
           });
         }
       }
@@ -926,8 +980,8 @@ public static class CorridorEditingCommands
     var ok = info.TargetType switch
     {
       SubassemblyLogicalNameType.Surface => kind == "surface",
-      SubassemblyLogicalNameType.Offset or SubassemblyLogicalNameType.Alignment => kind == "alignment",
-      SubassemblyLogicalNameType.Elevation or SubassemblyLogicalNameType.Profile => kind == "profile",
+      SubassemblyLogicalNameType.Offset or SubassemblyLogicalNameType.Alignment => kind is "alignment" or "feature_line",
+      SubassemblyLogicalNameType.Elevation or SubassemblyLogicalNameType.Profile => kind is "profile" or "feature_line",
       _ => false,
     };
     if (!ok)
@@ -964,9 +1018,14 @@ public static class CorridorEditingCommands
           }
         }
         break;
+      case "feature_line":
+        // by name, or by handle when the name is given as "handle:1A2B"
+        return targetName.StartsWith("handle:", StringComparison.OrdinalIgnoreCase)
+          ? FeatureLineCommands.Find(civilDoc, HostApplicationServices.WorkingDatabase, transaction, null, targetName.Substring(7).Trim(), OpenMode.ForRead).ObjectId
+          : FeatureLineCommands.Find(civilDoc, HostApplicationServices.WorkingDatabase, transaction, targetName, null, OpenMode.ForRead).ObjectId;
       default:
         throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT",
-          $"targetType '{targetType}' is not supported; use surface, alignment or profile. Nothing was changed.");
+          $"targetType '{targetType}' is not supported; use surface, alignment, profile or feature_line. Nothing was changed.");
     }
     return null;
   }

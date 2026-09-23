@@ -95,7 +95,7 @@ public static class CorridorSurfaceCommands
         var boundaryResults = new List<Dictionary<string, object?>>();
         if (boundaries != null)
           foreach (var node in boundaries.OfType<JsonObject>())
-            boundaryResults.Add(AddBoundary(surface, node, database, transaction));
+            boundaryResults.Add(AddBoundary(surface, node, database, transaction, corridor));
         result["boundaries"] = boundaryResults;
       }
       catch (JsonRpcDispatchException) { throw; }
@@ -180,7 +180,7 @@ public static class CorridorSurfaceCommands
           case "add_boundary":
           {
             var node = PluginRuntime.GetParameter(parameters, "boundary") as JsonObject ?? parameters ?? new JsonObject();
-            result["boundary"] = AddBoundary(surface, node, database, transaction);
+            result["boundary"] = AddBoundary(surface, node, database, transaction, corridor);
             break;
           }
           case "remove_boundary":
@@ -398,8 +398,9 @@ public static class CorridorSurfaceCommands
     try { return entity.GeometricExtents; } catch { return null; }
   }
 
-  private static Dictionary<string, object?> AddBoundary(CorridorSurface surface, JsonObject node, Database database, Transaction transaction)
+  private static Dictionary<string, object?> AddBoundary(CorridorSurface surface, JsonObject node, Database database, Transaction transaction, Corridor? corridor = null)
   {
+    Dictionary<string, object?>? outlineInfo = null;
     var type = (PluginRuntime.GetOptionalString(node, "type") ?? "corridor_extents").Trim().ToLowerInvariant();
     var boundaryName = PluginRuntime.GetOptionalString(node, "boundaryName") ?? PluginRuntime.GetOptionalString(node, "name") ?? DefaultBoundaryName(surface, type);
     var useAs = (PluginRuntime.GetOptionalString(node, "useAs") ?? "outside").Trim().ToLowerInvariant();
@@ -447,8 +448,18 @@ public static class CorridorSurfaceCommands
         boundary = surface.Boundaries.Add(boundaryName, pts);
         break;
       }
+      case "outline":
+      case "computed_outline":
+      {
+        if (corridor == null) throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "An outline boundary needs the corridor.");
+        var baselineIndex = (int)(PluginRuntime.GetOptionalDouble(node, "baselineIndex") ?? 0);
+        var (pts, info) = ComputeOutline(corridor, baselineIndex);
+        boundary = surface.Boundaries.Add(boundaryName, pts);
+        outlineInfo = info;
+        break;
+      }
       default:
-        throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", $"Boundary type '{type}' is not one of corridor_extents, feature_line, polyline, points.");
+        throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", $"Boundary type '{type}' is not one of corridor_extents, outline, feature_line, polyline, points.");
     }
 
     // A corridor-extents (shrink-wrap) boundary is always an outside boundary; Civil 3D throws if the type is touched.
@@ -462,12 +473,139 @@ public static class CorridorSurfaceCommands
     {
       boundary.BoundaryType = wantInside ? CorridorSurfaceBoundaryType.InsideBoundary : CorridorSurfaceBoundaryType.OutsideBoundary;
     }
-    return DescribeBoundary(boundary);
+    var described = DescribeBoundary(boundary);
+    if (outlineInfo != null) described["outline"] = outlineInfo;
+    return described;
+  }
+
+  /// <summary>
+  /// The outer edge of one baseline as a simple polygon, from the built sections: the outermost point of every applied
+  /// station, left side up-station then right side back. Where a bowtie has been repaired with a valley line, both sides'
+  /// sections end ON that line (and the arc sections all end on one point), so the raw outer edge runs down the valley and
+  /// back up it; Civil 3D's own corridor-extents boundary is refused there as a crossing polygon. The valley is inside the
+  /// covered ground, not on its edge, so points coded Valley are left out, except the outer end of each valley.
+  /// The polygon is static: add it again after a design change.
+  /// </summary>
+  private static (Point3dCollection Points, Dictionary<string, object?> Info) ComputeOutline(Corridor corridor, int baselineIndex)
+  {
+    if (baselineIndex < 0 || baselineIndex >= corridor.Baselines.Count)
+      throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", $"Corridor '{corridor.Name}' has no baseline {baselineIndex}.");
+    var baseline = corridor.Baselines[baselineIndex];
+    double[] stations;
+    try { stations = baseline.SortedStations() ?? Array.Empty<double>(); }
+    catch (Exception ex) { throw new JsonRpcDispatchException("CIVIL3D.API_ERROR", $"The applied stations could not be read: {ex.Message}"); }
+
+    var left = new List<(double S, double X, double Y, double Z, bool Valley, double Off)>();
+    var right = new List<(double S, double X, double Y, double Z, bool Valley, double Off)>();
+    static bool IsValley(CalculatedPoint p)
+    {
+      try { foreach (var c in p.CorridorCodes) if (string.Equals(c?.ToString(), "Valley", StringComparison.OrdinalIgnoreCase)) return true; } catch { }
+      return false;
+    }
+    foreach (var st in stations.OrderBy(x => x))
+    {
+      AppliedAssembly applied;
+      try { applied = baseline.GetAppliedAssemblyAtStation(st); } catch { continue; }
+      CalculatedPoint? pl = null, pr = null; double ol = 0, or = 0;
+      try
+      {
+        foreach (CalculatedPoint p in applied.Points)
+        {
+          var o = p.StationOffsetElevationToBaseline.Y;
+          if (o < -1e-9 && -o > ol) { ol = -o; pl = p; }
+          else if (o > 1e-9 && o > or) { or = o; pr = p; }
+        }
+        // a lane clipped to zero width puts its Valley point on the drain edge, at the same offset as the drain's own
+        // points: the station is clipped all the same, so the Valley point is the one that counts
+        foreach (CalculatedPoint p in applied.Points)
+        {
+          var o = p.StationOffsetElevationToBaseline.Y;
+          if (pl != null && o < 0 && Math.Abs(-o - ol) < 1e-6 && IsValley(p)) pl = p;
+          if (pr != null && o > 0 && Math.Abs(o - or) < 1e-6 && IsValley(p)) pr = p;
+        }
+      }
+      catch { continue; }
+      foreach (var (p, list) in new[] { (pl, left), (pr, right) })
+      {
+        if (p == null) continue;
+        Point3d xyz;
+        try { xyz = baseline.StationOffsetElevationToXYZ(p.StationOffsetElevationToBaseline); } catch { continue; }
+        list.Add((st, xyz.X, xyz.Y, xyz.Z, IsValley(p), Math.Abs(p.StationOffsetElevationToBaseline.Y)));
+      }
+    }
+    if (left.Count < 2 || right.Count < 2)
+      throw new JsonRpcDispatchException("CIVIL3D.INVALID_STATE", $"Baseline {baselineIndex} of '{corridor.Name}' has no built sections on both sides; rebuild the corridor first.");
+
+    var valleysSkipped = 0; var valleyEnds = 0;
+    List<(double S, double X, double Y, double Z)> Chain(List<(double S, double X, double Y, double Z, bool Valley, double Off)> side)
+    {
+      var kept = new List<(double S, double X, double Y, double Z)>();
+      for (var i = 0; i < side.Count;)
+      {
+        if (!side[i].Valley) { kept.Add((side[i].S, side[i].X, side[i].Y, side[i].Z)); i++; continue; }
+        var j = i; while (j + 1 < side.Count && side[j + 1].Valley) j++;
+        // the outer end of the valley is where it meets the ground: of the run, the point furthest from the baseline
+        // (the offsets grow along the valley towards the meet; "the end further from the run's middle" failed on runs of two)
+        var pick = side[i];
+        for (var k = i + 1; k <= j; k++) if (side[k].Off > pick.Off) pick = side[k];
+        kept.Add((pick.S, pick.X, pick.Y, pick.Z)); valleyEnds++;
+        valleysSkipped += j - i;
+        i = j + 1;
+      }
+      return kept;
+    }
+    var ring = Chain(left);
+    var back = Chain(right); back.Reverse();
+    ring.AddRange(back);
+
+    // drop repeated points, and a kept valley point that only makes a spike (its two neighbours are the same place)
+    const double same = 0.10;
+    bool Near((double S, double X, double Y, double Z) p, (double S, double X, double Y, double Z) q) => Math.Abs(p.X - q.X) < same && Math.Abs(p.Y - q.Y) < same;
+    var changed = true;
+    while (changed && ring.Count > 3)
+    {
+      changed = false;
+      for (var i = 0; i < ring.Count && ring.Count > 3; i++)
+      {
+        var prev = ring[(i + ring.Count - 1) % ring.Count]; var next = ring[(i + 1) % ring.Count];
+        if (Near(ring[i], next) || Near(prev, next)) { ring.RemoveAt(i); changed = true; i--; }
+      }
+    }
+
+    // refuse a polygon that still crosses itself, saying where: that is an unrepaired bowtie, not something to paper over
+    static bool Cross((double X, double Y) p1, (double X, double Y) p2, (double X, double Y) p3, (double X, double Y) p4)
+    {
+      double O((double X, double Y) a, (double X, double Y) b, (double X, double Y) c) => (b.X - a.X) * (c.Y - a.Y) - (b.Y - a.Y) * (c.X - a.X);
+      var d1 = O(p3, p4, p1); var d2 = O(p3, p4, p2); var d3 = O(p1, p2, p3); var d4 = O(p1, p2, p4);
+      return d1 * d2 < 0 && d3 * d4 < 0;
+    }
+    var n = ring.Count; var crossings = new List<string>();
+    for (var i = 0; i < n && crossings.Count < 5; i++)
+      for (var j = i + 2; j < n && crossings.Count < 5; j++)
+      {
+        if (i == 0 && j == n - 1) continue;
+        var a0 = ring[i]; var a1 = ring[(i + 1) % n]; var b0 = ring[j]; var b1 = ring[(j + 1) % n];
+        if (Math.Max(a0.X, a1.X) < Math.Min(b0.X, b1.X) || Math.Max(b0.X, b1.X) < Math.Min(a0.X, a1.X)) continue;
+        if (Cross((a0.X, a0.Y), (a1.X, a1.Y), (b0.X, b0.Y), (b1.X, b1.Y))) crossings.Add($"{a0.S:0.##}-{a1.S:0.##} x {b0.S:0.##}-{b1.S:0.##}");
+      }
+    if (crossings.Count > 0)
+      throw new JsonRpcDispatchException("CIVIL3D.INVALID_STATE", $"The outer edge of '{corridor.Name}' crosses itself between stations {string.Join("; ", crossings)}: there is an unrepaired bowtie (run bowtie_check). No boundary was added.");
+
+    var pts = new Point3dCollection();
+    foreach (var q in ring) pts.Add(new Point3d(q.X, q.Y, q.Z));
+    pts.Add(new Point3d(ring[0].X, ring[0].Y, ring[0].Z));
+    var info = new Dictionary<string, object?>
+    {
+      ["baselineIndex"] = baselineIndex, ["vertices"] = ring.Count, ["stationsLeft"] = left.Count, ["stationsRight"] = right.Count,
+      ["valleyPointsLeftOut"] = valleysSkipped, ["valleyEndsKept"] = valleyEnds,
+      ["note"] = "Static polygon from the built sections; add it again after a design change. Points coded Valley are inside the covered ground and are left out." + (corridor.Baselines.Count > 1 ? $" The corridor has {corridor.Baselines.Count} baselines; only baseline {baselineIndex} is outlined." : ""),
+    };
+    return (pts, info);
   }
 
   private static string DefaultBoundaryName(CorridorSurface surface, string type)
   {
-    var stem = type switch { "feature_line" or "feature_line_code" => "Feature line boundary", "polyline" => "Polyline boundary", "points" => "Point boundary", _ => "Corridor extents" };
+    var stem = type switch { "feature_line" or "feature_line_code" => "Feature line boundary", "polyline" => "Polyline boundary", "points" => "Point boundary", "outline" or "computed_outline" => "Corridor outline", _ => "Corridor extents" };
     var existing = surface.Boundaries.BoundaryNames().ToHashSet(StringComparer.OrdinalIgnoreCase);
     if (!existing.Contains(stem)) return stem;
     for (var i = 2; i < 1000; i++) if (!existing.Contains($"{stem} ({i})")) return $"{stem} ({i})";

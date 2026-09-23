@@ -186,7 +186,13 @@ public static partial class CorridorBowtieCommands
       var g = search.G;
       var region = search.Region;
       var verdict = search.Verdict;
+      // Curved bends: this construction (valley + locus of curvature centres, joined end to end) was shown on 19 Sep 2026 to clip
+      // sections in the wrong place while still passing bowtie_check. It must never write again; bowtie_seam replaces it.
+      if (g.BendType == "curve" && !dryRun)
+        throw new JsonRpcDispatchException("CIVIL3D.INVALID_STATE",
+          $"Refused, nothing was changed: the bend between {g.TurnStart:0.###} and {g.TurnEnd:0.###} is a curve, and bowtie_valley is only valid for angle points. Use bowtie_seam for this bend.");
       var warnings = new List<string>(g.Warnings);
+      if (g.BendType == "curve") warnings.Add("This bend is a curve: bowtie_valley is only valid for angle points and a real run is refused. Use bowtie_seam.");
       warnings.AddRange(verdict.Warnings);
       warnings.AddRange(search.Notes);
       if (clippedTemplates.Contains(g.SA) || clippedTemplates.Contains(g.SB))
@@ -336,7 +342,7 @@ public static partial class CorridorBowtieCommands
           tStart = (startX - piX) * bx + (startY - piY) * by;
         }
       }
-      warnings.Add($"The bend is curved between {turnStart:0.###} and {turnEnd:0.###}: the valley starts at the curve centre ({startX:0.###}, {startY:0.###}), where the curve's sections converge. Curved bends are not live-tested yet: check the sections.");
+      warnings.Add($"The bend is curved between {turnStart:0.###} and {turnEnd:0.###}: its sections are normals to the baseline, so they all converge on the centre of curvature ({startX:0.###}, {startY:0.###}). The clip line is the valley run on into the locus of those centres.");
     }
     g.StartX = startX; g.StartY = startY; g.TStart = tStart;
 
@@ -1454,6 +1460,12 @@ public static partial class CorridorBowtieCommands
       return row;
     }
 
+    if ((valley.Description ?? "").TrimStart().StartsWith(SeamDescriptionTag, StringComparison.OrdinalIgnoreCase))
+    {
+      row["status"] = "skipped";
+      row["reason"] = "built by bowtie_seam: to refresh it, unmap the ClipTarget, rebuild, delete the seam and cap alignments and run bowtie_seam again";
+      return row;
+    }
     var desc = ParseValleyDescription(valley.Description);
     row["recorded"] = desc.Count > 0;
 

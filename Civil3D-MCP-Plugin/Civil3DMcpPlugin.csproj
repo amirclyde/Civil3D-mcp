@@ -16,6 +16,11 @@
   </Target>
 
   <ItemGroup>
+    <!-- Bowtie seam kernel: plain C# with its own offline tests (bowtie-kernel/). Compiled into the plugin so NETLOAD stays one DLL. -->
+    <Compile Include="..\bowtie-kernel\BowtieKernel\*.cs" LinkBase="BowtieKernel" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Reference Include="accoremgd">
       <HintPath>$(Civil3DReferencesPath)\accoremgd.dll</HintPath>
       <Private>False</Private>

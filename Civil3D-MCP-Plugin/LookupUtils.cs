@@ -20,7 +20,19 @@ public static class LookupUtils
       return layerTable[layerName];
     }
 
-    return database.Clayer;
+    // a layer that was asked for by name and does not exist is created (it used to fall back, silently, to the current layer)
+    try
+    {
+      var writable = CivilObjectUtils.GetRequiredObject<LayerTable>(transaction, database.LayerTableId, OpenMode.ForWrite);
+      var record = new LayerTableRecord { Name = layerName };
+      var id = writable.Add(record);
+      transaction.AddNewlyCreatedDBObject(record, true);
+      return id;
+    }
+    catch
+    {
+      return database.Clayer;
+    }
   }
 
   public static ObjectId GetSiteId(CivilDocument civilDoc, Transaction transaction, string? siteName)

@@ -119,7 +119,8 @@ public static class SectionCommands
           new(x1, y1),
           new(x2, y2),
         };
-        SampleLine.Create($"SL-{station:0.##}", groupId, points);
+        // Civil 3D wants sample line names unique across the drawing, not only inside the group: a second group at the same stations failed with "Sample line name should not duplicate"
+        SampleLine.Create($"{alignment.Name} {station:0+000.00}", groupId, points);
         createdStations.Add(station);
       }
 
