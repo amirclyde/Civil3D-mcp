@@ -433,6 +433,10 @@ const CorridorBowtieSeamArgsSchema = z.object({
   writeAs: z.enum(["feature_line", "alignment"]).optional(),
   levelFromTarget: z.boolean().optional(),
   maxLevelAdjust: z.number().nonnegative().optional(),
+  acceptOffSurfaceEnds: z.boolean().optional(),
+  adjustFrom: z.enum(["auto", "hinge", "last_link"]).optional(),
+  levelRule: z.enum(["no_steeper", "mean"]).optional(),
+  clipAssembly: z.string().optional(),
   dryRun: z.boolean().optional(),
 });
 
@@ -442,10 +446,42 @@ const CorridorBowtieSeamPreviewArgsSchema = CorridorBowtieSeamArgsSchema.extend(
 
 const CorridorBowtieFixArgsSchema = CorridorBowtieSeamArgsSchema.extend({
   action: z.literal("bowtie_fix"),
+  startStation: z.number().optional(),
+  endStation: z.number().optional(),
   assemblyName: z.string().optional(),
   subassemblyName: z.string().optional(),
   regionName: z.string().optional(),
   padding: z.number().nonnegative().optional(),
+  minTurnDegrees: z.number().nonnegative().optional(),
+  keepOnFailure: z.boolean().optional(),
+  parentRegion: z.string().optional(),
+  parentAssembly: z.string().optional(),
+  splitBefore: z.string().optional(),
+  splitAfter: z.string().optional(),
+});
+
+const CorridorBowtieBendsArgsSchema = z.object({
+  action: z.literal("bowtie_bends"),
+  name: z.string(),
+  baselineIndex: z.number().int().nonnegative().optional(),
+  startStation: z.number().optional(),
+  endStation: z.number().optional(),
+  minTurnDegrees: z.number().nonnegative().optional(),
+});
+
+const CorridorBowtieUnfixArgsSchema = z.object({
+  action: z.literal("bowtie_unfix"),
+  name: z.string(),
+  baselineIndex: z.number().int().nonnegative().optional(),
+  regionName: z.string(),
+  merge: z.boolean().optional(),
+  restoreAssembly: z.boolean().optional(),
+  rebuild: z.boolean().optional(),
+  dryRun: z.boolean().optional(),
+});
+
+const CorridorBowtieUnfixPreviewArgsSchema = CorridorBowtieUnfixArgsSchema.extend({
+  action: z.literal("bowtie_unfix_preview"),
 });
 
 const CorridorBowtieRefreshArgsSchema = z.object({
@@ -523,6 +559,8 @@ const canonicalCorridorInputShape = {
     "bowtie_valley",
     "bowtie_seam",
     "bowtie_fix",
+    "bowtie_bends",
+    "bowtie_unfix",
     "bowtie_refresh",
     "bowtie_check",
     "region_stations",
@@ -624,7 +662,15 @@ const canonicalCorridorInputShape = {
   allStations: z.boolean().optional().describe("bowtie_seam: list every section in the result, not only the clipped ones."),
   levelFromTarget: z.boolean().optional().describe("bowtie_seam: the clip subassembly (UTNM_LaneDaylightClip v0.3, target ClipElev) also takes its level from the valley line, the mean of the two sides, so both sides end on the same XYZ (default true with feature lines)."),
   maxLevelAdjust: z.number().nonnegative().optional().describe("bowtie_seam with levelFromTarget: largest distance a link may be moved off its own slope (default 0.30 m); above it the bend is a design conflict."),
+  acceptOffSurfaceEnds: z.boolean().optional().describe("bowtie_seam / bowtie_fix: accept clipped sections that never come near the daylight surface (walls, fixed-width sections in a region that still has a surface target). Default false: that usually means the wrong surface."),
   writeAs: z.enum(["feature_line", "alignment"]).optional().describe("bowtie_seam: write the valley line and the apex bar as siteless feature lines carrying their levels (default) or as alignments."),
+  minTurnDegrees: z.number().nonnegative().optional().describe("bowtie_bends / bowtie_fix: bends turning less than this are ignored (default 3)."),
+  adjustFrom: z.enum(["auto", "hinge", "last_link"]).optional().describe("bowtie_seam / bowtie_fix: how the clip part takes a link to the valley level - hinge (spread over every slope and bench from the hinge: UTNM_LaneDaylightClip v0.4, Spread From Hinge = Yes), last_link (v0.3, or Spread From Hinge = No); auto (default) reads it from the clip assembly."),
+  levelRule: z.enum(["no_steeper", "mean"]).optional().describe("bowtie_seam / bowtie_fix: the valley level where the two sides differ - no_steeper (default: a side in cut is only lowered, in fill only raised, so no slope comes out steeper than designed; the mean where no such level exists, flagged) or mean (halfway)."),
+  clipAssembly: z.string().optional().describe("bowtie_seam: the clip assembly the region will get (for adjustFrom auto); bowtie_fix fills it from assemblyName."),
+  keepOnFailure: z.boolean().optional().describe("bowtie_fix: leave a repair that fails part-way in the drawing for inspection (default false: every change made for that bend is rolled back with bowtie_unfix)."),
+  merge: z.boolean().optional().describe("bowtie_unfix: merge the region back with the pieces it was cut from (default true)."),
+  restoreAssembly: z.boolean().optional().describe("bowtie_unfix: give the region back the assembly it had before the repair (default true)."),
 };
 
 // ─── Domain definition ────────────────────────────────────────────────────────
@@ -638,7 +684,7 @@ type CorridorRawArgs = Record<string, unknown>;
  */
 function resolveCorridorAction(rawArgs: CorridorRawArgs): { action: string; args: CorridorRawArgs } {
   const action = String(rawArgs.action ?? "");
-  if ((action === "bowtie_valley" || action === "bowtie_refresh" || action === "bowtie_seam") && rawArgs.dryRun === true) {
+  if ((action === "bowtie_valley" || action === "bowtie_refresh" || action === "bowtie_seam" || action === "bowtie_unfix") && rawArgs.dryRun === true) {
     const preview = `${action}_preview`;
     return { action: preview, args: { ...rawArgs, action: preview } };
   }
@@ -673,6 +719,14 @@ function bowtieSeamParams(args: CorridorRawArgs, dryRun: boolean) {
     writeAs: args.writeAs ?? null,
     levelFromTarget: args.levelFromTarget ?? null,
     maxLevelAdjust: args.maxLevelAdjust ?? null,
+    acceptOffSurfaceEnds: args.acceptOffSurfaceEnds ?? null,
+    adjustFrom: args.adjustFrom ?? null,
+    levelRule: args.levelRule ?? null,
+    clipAssembly: args.clipAssembly ?? null,
+    parentRegion: args.parentRegion ?? null,
+    parentAssembly: args.parentAssembly ?? null,
+    splitBefore: args.splitBefore ?? null,
+    splitAfter: args.splitAfter ?? null,
     dryRun,
   };
 }
@@ -1290,8 +1344,11 @@ export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
         async (appClient) => await appClient.sendCommand("bowtieSeam", bowtieSeamParams(args, args.dryRun === true)),
       ),
     },
-    // One step for one bend: solve, give the clash range its own region (optionally with a clip assembly, surface targets
-    // carried over in the same transaction), write the valley lines, map ClipTarget + ClipElev, rebuild, check.
+    // Every bend in a station range (default: the whole baseline), each in one step: solve, give the clash range its own
+    // region (optionally with a clip assembly, surface targets carried over in the same transaction), write the valley
+    // lines, map ClipTarget + ClipElev, rebuild, check. A bend whose repair fails part-way is rolled back (bowtie_unfix)
+    // unless keepOnFailure; bends without a bowtie, or already repaired, are skipped. The inside of each bend is found from
+    // the baseline; side only filters.
     bowtie_fix: {
       action: "bowtie_fix",
       inputSchema: CorridorBowtieFixArgsSchema,
@@ -1299,81 +1356,186 @@ export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
       capabilities: ["edit"],
       requiresActiveDrawing: true,
       safeForRetry: false,
-      pluginMethods: ["bowtieSeam", "isolateCorridorRanges", "getCorridorTargetMappings", "setCorridorTargetMappings", "checkCorridorBowties"],
+      pluginMethods: ["bowtieBends", "bowtieSeam", "isolateCorridorRanges", "getCorridorTargetMappings", "setCorridorTargetMappings", "checkCorridorBowties", "bowtieUnfix"],
       execute: async (args) => await withApplicationConnection(async (appClient) => {
-        const stages: Record<string, unknown> = {};
-        const done = (stage: string, ok: boolean, message: string) => ({ corridorName: args.name, ok, stoppedAt: ok ? null : stage, message, stages });
-        const side = String(args.side ?? "");
-        if (side !== "left" && side !== "right") return done("input", false, "bowtie_fix needs side: left or right (the inside of the bend). Nothing was changed.");
+        const call = async (method: string, params: Record<string, unknown>): Promise<{ ok: true; value: any } | { ok: false; error: string }> => {
+          try { return { ok: true, value: await appClient.sendCommand(method, params) }; }
+          catch (e) { return { ok: false, error: e instanceof Error ? e.message : String(e) }; }
+        };
+        const baselineIndex = args.baselineIndex ?? 0;
+        const sideFilter = args.side === "left" || args.side === "right" ? args.side : null;
+        const bendsRes = await call("bowtieBends", {
+          corridorName: args.name, baselineIndex, startStation: args.startStation ?? null, endStation: args.endStation ?? null,
+          minTurnDegrees: args.minTurnDegrees ?? null,
+        });
+        if (!bendsRes.ok) return { corridorName: args.name, ok: false, message: `The bends could not be read: ${bendsRes.error}. Nothing was changed.`, bends: [] };
+        const bends = ((bendsRes.value?.bends ?? []) as any[]).filter((b) => !sideFilter || b.side === sideFilter);
 
-        // 1. solve on the sections as built (read-only)
-        const preview = await appClient.sendCommand("bowtieSeam", bowtieSeamParams({ ...args, snapshotPath: null }, true)) as any;
-        stages.preview = { status: preview?.result?.status, blocking: preview?.blocking, meetStations: preview?.result?.meetStations, region: preview?.region, checks: preview?.result?.checks };
-        if (preview?.result?.status !== "Ok" || (preview?.blocking ?? []).length > 0)
-          return done("preview", false, "The bend cannot be fixed as it stands (see stages.preview). Nothing was changed.");
-        const meet = (preview.result.meetStations ?? []) as number[];
-        if (meet.length !== 2) return done("preview", false, "The solver gave no meet stations. Nothing was changed.");
-        const pad = Number(args.padding ?? 2);
-        const region = preview.region as { name: string; start: number; end: number };
-        const from = Math.max(region.start, Math.floor(meet[0] - pad));
-        const to = Math.min(region.end, Math.ceil(meet[1] + pad));
+        const fixOne = async (bend: any) => {
+          const stages: Record<string, unknown> = {};
+          const side = String(bend.side);
+          const bendArgs = { ...args, startStation: bend.startStation, endStation: bend.endStation, side, clipAssembly: args.clipAssembly ?? args.assemblyName ?? null };
+          const out = (outcome: string, message: string, extra: Record<string, unknown> = {}) =>
+            ({ startStation: bend.startStation, endStation: bend.endStation, side, type: bend.type, turnDegrees: bend.turnDegrees, outcome, message, ...extra, stages });
+          if (bend.repaired) return out("skipped", `Region '${bend.region}' already carries a valley repair (mapped ClipTarget): refresh it with bowtie_refresh, or undo it with bowtie_unfix first.`);
 
-        // 2. own region for the clash range; a different assembly gets the parent's surface targets in the same transaction
-        const swapping = typeof args.assemblyName === "string" && args.assemblyName.length > 0;
-        const alreadyIsolated = Math.abs(region.start - from) < 0.011 && Math.abs(region.end - to) < 0.011;
-        let regionName = region.name;
-        if (!alreadyIsolated || swapping) {
-          const isolated = await appClient.sendCommand("isolateCorridorRanges", {
-            corridorName: args.name, baselineIndex: args.baselineIndex ?? 0,
-            ranges: [{ startStation: from, endStation: to, ...(args.regionName ? { name: args.regionName } : {}) }],
-            namePrefix: "BT", frequency: null, assemblyName: swapping ? args.assemblyName : null,
-            matchParent: true, carrySurfaceTargets: true, dryRun: false, rebuild: swapping,
-          }) as any;
-          stages.isolate = { isolated: isolated?.isolated, rebuilt: isolated?.rebuilt, rebuildError: isolated?.rebuildError, undo: isolated?.undo };
-          regionName = isolated?.isolated?.[0]?.name ?? regionName;
-          if (isolated?.rebuildError) return done("isolate", false, `The region was isolated but the rebuild failed: ${isolated.rebuildError}`);
-        }
+          // 1. solve on the sections as built (read-only)
+          const pre = await call("bowtieSeam", bowtieSeamParams({ ...bendArgs, snapshotPath: null }, true));
+          if (!pre.ok) {
+            const already = /already clipped/i.test(pre.error);
+            return out(already ? "skipped" : "failed", already ? "Sections in range are already clipped: this bend is already repaired." : `Could not be solved: ${pre.error}. Nothing was changed.`);
+          }
+          const preview = pre.value;
+          const status = preview?.result?.status;
+          stages.preview = { status, reasons: preview?.result?.reasons, blocking: preview?.blocking, meetStations: preview?.result?.meetStations, region: preview?.region, checks: preview?.result?.checks };
+          if (status === "NoBowtie" || status === "NoBend") return out("skipped", "No bowtie on this bend: nothing to repair.");
+          if (status !== "Ok" || (preview?.blocking ?? []).length > 0)
+            return out("refused", `Cannot be repaired as it stands (${status}): ${[...(preview?.result?.reasons ?? []), ...(preview?.blocking ?? [])].join("; ")}. Nothing was changed.`, { highlight: preview?.highlight ?? null });
+          const meet = (preview.result.meetStations ?? []) as number[];
+          if (meet.length !== 2 || meet.some((m) => typeof m !== "number")) return out("refused", "The solver gave no meet stations. Nothing was changed.");
+          const pad = Number(args.padding ?? 2);
+          const region = preview.region as { name: string; start: number; end: number; assemblyName?: string | null };
+          const from = Math.max(region.start, Math.floor(Math.min(meet[0], preview.result.clipFrom ?? meet[0]) - pad));
+          const to = Math.min(region.end, Math.ceil(Math.max(meet[1], preview.result.clipTo ?? meet[1]) + pad));
 
-        // 3. the inside clip subassembly
-        const mapping = await appClient.sendCommand("getCorridorTargetMappings", { corridorName: args.name, regionIndex: null, baselineIndex: args.baselineIndex ?? 0 }) as any;
-        const reg = (mapping?.regions ?? []).find((r: any) => r.regionName === regionName);
-        const clipSubs = [...new Set(((reg?.targets ?? []) as any[]).filter((t) => t.parameterName === "ClipTarget").map((t) => String(t.subassemblyName)))];
-        const sideRe = side === "left" ? /(^|[\s_\-])(l|left)$/i : /(^|[\s_\-])(r|right)$/i;
-        const sub = typeof args.subassemblyName === "string" && args.subassemblyName.length > 0
-          ? args.subassemblyName
-          : (clipSubs.filter((n) => sideRe.test(n)).length === 1 ? clipSubs.filter((n) => sideRe.test(n))[0] : null);
-        stages.clipSubassemblies = clipSubs;
-        if (!sub || !clipSubs.includes(sub))
-          return done("subassembly", false, `Region '${regionName}' has no unambiguous clip subassembly for the ${side} side (found: ${clipSubs.join(", ") || "none with a ClipTarget"}). Pass subassemblyName, or assemblyName for an assembly that has one. The region split stays; nothing else was changed.`);
-        const hasElev = ((reg?.targets ?? []) as any[]).some((t) => t.parameterName === "ClipElev" && t.subassemblyName === sub);
+          // 2. own region for the clash range; a different assembly gets the parent's surface targets in the same transaction
+          const swapping = typeof args.assemblyName === "string" && args.assemblyName.length > 0;
+          const alreadyIsolated = Math.abs(region.start - from) < 0.011 && Math.abs(region.end - to) < 0.011;
+          const ctx = { parentRegion: region.name, parentAssembly: region.assemblyName ?? null, splitBefore: null as string | null, splitAfter: null as string | null };
+          let regionName = region.name;
+          let changed = false;
+          const rollback = async (stage: string, message: string) => {
+            if (!changed || args.keepOnFailure === true) return out("failed", `${message}${changed ? " The changes for this bend were left in the drawing (keepOnFailure)." : " Nothing was changed."}`, { failedAt: stage });
+            const undo = await call("bowtieUnfix", { corridorName: args.name, baselineIndex, regionName, merge: true, restoreAssembly: true, rebuild: true, dryRun: false, ...ctx });
+            stages.rollback = undo.ok ? { targetsCleared: undo.value?.targetsCleared, valleyLinesErased: undo.value?.valleyLinesErased, stationsDeleted: undo.value?.stationsDeleted, assemblyRestored: undo.value?.assemblyRestored, merged: undo.value?.merged, rebuildError: undo.value?.rebuildError, warnings: undo.value?.warnings } : { error: undo.error };
+            return out(undo.ok ? "rolled_back" : "failed", `${message} ${undo.ok ? "Every change made for this bend was undone (see stages.rollback)." : `The roll-back failed too: ${undo.error}. Check region '${regionName}' by hand (bowtie_unfix).`}`, { failedAt: stage });
+          };
+          if (!alreadyIsolated || swapping) {
+            const iso = await call("isolateCorridorRanges", {
+              corridorName: args.name, baselineIndex,
+              ranges: [{ startStation: from, endStation: to, ...(args.regionName && bends.length === 1 ? { name: args.regionName } : {}) }],
+              namePrefix: "BT", frequency: null, assemblyName: swapping ? args.assemblyName : null,
+              matchParent: true, carrySurfaceTargets: true, dryRun: false, rebuild: swapping,
+            });
+            if (!iso.ok) return out("failed", `The region could not be isolated: ${iso.error}. Nothing was changed.`, { failedAt: "isolate" });
+            const isolated = iso.value;
+            const piece = isolated?.isolated?.[0];
+            changed = !!piece;
+            regionName = piece?.name ?? regionName;
+            const undoRow = (isolated?.undo ?? [])[0];
+            const pieces = (undoRow?.regions ?? []) as string[];
+            if (piece?.splitAtStart && pieces.length > 1) ctx.splitBefore = pieces[0];
+            if (piece?.splitAtEnd && pieces.length > 1) ctx.splitAfter = pieces[pieces.length - 1];
+            stages.isolate = { isolated: isolated?.isolated, rebuilt: isolated?.rebuilt, rebuildError: isolated?.rebuildError };
+            if (!piece) return out("failed", `Nothing was isolated for ${from}-${to} (${JSON.stringify(isolated?.skipped ?? [])}).`, { failedAt: "isolate" });
+            if (isolated?.rebuildError) return await rollback("isolate", `The region was isolated but the rebuild failed: ${isolated.rebuildError}.`);
+          }
 
-        // 4. the valley lines (after a swap: solved again on the clip assembly's own, still unclipped, sections)
-        const seam = await appClient.sendCommand("bowtieSeam", bowtieSeamParams({ ...args, levelFromTarget: args.levelFromTarget ?? hasElev }, false)) as any;
-        stages.seam = { status: seam?.result?.status, blocking: seam?.blocking, written: seam?.written, stationsAdded: seam?.stationsAdded, checks: seam?.result?.checks, warnings: seam?.warnings };
-        const written = (seam?.written ?? []) as any[];
-        if (written.length === 0) return done("seam", false, "No valley line was written (see stages.seam). The region split stays; no target was mapped.");
-        const names = written.map((w) => String(w.name));
-        const kind = written[0].type === "alignment" ? "alignment" : "feature_line";
+          // 3. the inside clip subassembly
+          const mapping = await call("getCorridorTargetMappings", { corridorName: args.name, regionIndex: null, baselineIndex });
+          if (!mapping.ok) return await rollback("subassembly", `The targets could not be read: ${mapping.error}.`);
+          const reg = (mapping.value?.regions ?? []).find((r: any) => r.regionName === regionName);
+          const clipSubs = [...new Set(((reg?.targets ?? []) as any[]).filter((t) => t.parameterName === "ClipTarget").map((t) => String(t.subassemblyName)))];
+          const sideRe = side === "left" ? /(^|[\s_\-])(l|left)$/i : /(^|[\s_\-])(r|right)$/i;
+          const bySide = clipSubs.filter((n) => sideRe.test(n));
+          const sub = typeof args.subassemblyName === "string" && args.subassemblyName.length > 0 ? args.subassemblyName : (bySide.length === 1 ? bySide[0] : null);
+          stages.clipSubassemblies = clipSubs;
+          if (!sub || !clipSubs.includes(sub))
+            return await rollback("subassembly", `Region '${regionName}' has no unambiguous clip subassembly for the ${side} side (found: ${clipSubs.join(", ") || "none with a ClipTarget"}); pass subassemblyName, or assemblyName for an assembly that has one.`);
+          const hasElev = ((reg?.targets ?? []) as any[]).some((t) => t.parameterName === "ClipElev" && t.subassemblyName === sub);
 
-        // 5. map and rebuild once
-        const targets: any[] = [{ parameterName: "ClipTarget", subassemblyName: sub, targetType: kind, targetName: names[0], targetNames: names.slice(1), targetToOption: "Nearest" }];
-        if (hasElev && kind === "feature_line")
-          targets.push({ parameterName: "ClipElev", subassemblyName: sub, targetType: kind, targetName: names[0], targetNames: names.slice(1), targetToOption: "Nearest" });
-        const mapped = await appClient.sendCommand("setCorridorTargetMappings", { corridorName: args.name, regionName, baselineIndex: args.baselineIndex ?? 0, targets, rebuild: true }) as any;
-        stages.map = { region: regionName, subassembly: sub, applied: mapped?.applied, rebuilt: mapped?.rebuilt, rebuildError: mapped?.rebuildError };
-        if (mapped?.rebuildError) return done("map", false, `Targets were mapped but the rebuild failed: ${mapped.rebuildError}`);
+          // 4. the valley lines (after a swap: solved again on the clip assembly's own, still unclipped, sections)
+          const seamRes = await call("bowtieSeam", bowtieSeamParams({ ...bendArgs, ...ctx, levelFromTarget: args.levelFromTarget ?? hasElev }, false));
+          if (!seamRes.ok) return await rollback("seam", `The valley lines could not be written: ${seamRes.error}.`);
+          const seam = seamRes.value;
+          stages.seam = { status: seam?.result?.status, blocking: seam?.blocking, written: seam?.written, stationsAdded: seam?.stationsAdded, checks: seam?.result?.checks, warnings: seam?.warnings };
+          const written = (seam?.written ?? []) as any[];
+          if (written.length === 0) return await rollback("seam", "No valley line was written (see stages.seam).");
+          changed = true;
+          const names = written.map((w) => String(w.name));
+          const kind = written[0].type === "alignment" ? "alignment" : "feature_line";
 
-        // 6. verify on the built corridor
-        const check = await appClient.sendCommand("checkCorridorBowties", {
-          corridorName: args.name, baselineIndex: args.baselineIndex ?? 0, side, startStation: from - 5, endStation: to + 5,
-          linkCode: args.linkCode ?? null, minOffset: null, code: null, tolerance: null, maxListed: null,
-        }) as any;
-        stages.check = check;
-        const clean = check?.clean === true;
-        return done("check", clean, clean
-          ? `Bend ${from}-${to} (${side}) repaired in region '${regionName}': no link crossings, no daylight loops.`
-          : "The repair was applied but the built corridor still shows crossings (see stages.check).");
+          // 5. map and rebuild once
+          const targets: any[] = [{ parameterName: "ClipTarget", subassemblyName: sub, targetType: kind, targetName: names[0], targetNames: names.slice(1), targetToOption: "Nearest" }];
+          if (hasElev && kind === "feature_line")
+            targets.push({ parameterName: "ClipElev", subassemblyName: sub, targetType: kind, targetName: names[0], targetNames: names.slice(1), targetToOption: "Nearest" });
+          const mapped = await call("setCorridorTargetMappings", { corridorName: args.name, regionName, baselineIndex, targets, rebuild: true });
+          if (!mapped.ok) return await rollback("map", `The targets could not be mapped: ${mapped.error}.`);
+          stages.map = { region: regionName, subassembly: sub, applied: mapped.value?.applied, rebuilt: mapped.value?.rebuilt, rebuildError: mapped.value?.rebuildError };
+          if (mapped.value?.rebuildError) return await rollback("map", `Targets were mapped but the rebuild failed: ${mapped.value.rebuildError}.`);
+
+          // 6. verify on the built corridor
+          const check = await call("checkCorridorBowties", {
+            corridorName: args.name, baselineIndex, side, startStation: from - 5, endStation: to + 5,
+            linkCode: args.linkCode ?? null, minOffset: null, code: null, tolerance: null, maxListed: null,
+          });
+          if (!check.ok) return await rollback("check", `The result could not be checked: ${check.error}.`);
+          stages.check = check.value;
+          if (check.value?.clean !== true) return await rollback("check", "The repair was applied but the built corridor still shows crossings or loops (see stages.check).");
+          return out("repaired", `Bend ${from}-${to} (${side}) repaired in region '${regionName}': no link crossings, no daylight loops.`,
+            { region: regionName, valleyLines: names, highlight: seam?.highlight ?? preview?.highlight ?? null, levelMove: seam?.result?.checks?.maxLevelAdjust ?? null, slopeChange: seam?.result?.checks?.maxSlopeChange ?? null });
+        };
+
+        const results: any[] = [];
+        for (const bend of bends) results.push(await fixOne(bend));
+        const count = (o: string) => results.filter((r) => r.outcome === o).length;
+        const summary = { bends: results.length, repaired: count("repaired"), skipped: count("skipped"), refused: count("refused"), rolledBack: count("rolled_back"), failed: count("failed") };
+        return {
+          corridorName: args.name,
+          ok: summary.failed === 0 && summary.rolledBack === 0,
+          summary,
+          message: bends.length === 0 ? "No bend in the range." :
+            `${summary.repaired} repaired, ${summary.skipped} skipped (no bowtie or already repaired), ${summary.refused} refused as they stand, ${summary.rolledBack} rolled back, ${summary.failed} failed.`,
+          highlight: results.filter((r) => r.highlight || (typeof r.slopeChange === "number" && r.slopeChange > 0.1)).map((r) => ({ startStation: r.startStation, endStation: r.endStation, side: r.side, sectionChanges: r.highlight, levelMove: r.levelMove, slopeChange: r.slopeChange })),
+          bends: results,
+        };
       }),
+    },
+    bowtie_bends: {
+      action: "bowtie_bends",
+      inputSchema: CorridorBowtieBendsArgsSchema,
+      responseSchema: GenericCorridorResponseSchema,
+      capabilities: ["query", "analyze"],
+      requiresActiveDrawing: true,
+      safeForRetry: true,
+      pluginMethods: ["bowtieBends"],
+      execute: async (args) => await withApplicationConnection(
+        async (appClient) => await appClient.sendCommand("bowtieBends", {
+          corridorName: args.name, baselineIndex: args.baselineIndex ?? 0,
+          startStation: args.startStation ?? null, endStation: args.endStation ?? null, minTurnDegrees: args.minTurnDegrees ?? null,
+        }),
+      ),
+    },
+    bowtie_unfix: {
+      action: "bowtie_unfix",
+      inputSchema: CorridorBowtieUnfixArgsSchema,
+      responseSchema: GenericCorridorResponseSchema,
+      capabilities: ["edit"],
+      requiresActiveDrawing: true,
+      safeForRetry: false,
+      pluginMethods: ["bowtieUnfix"],
+      execute: async (args) => await withApplicationConnection(
+        async (appClient) => await appClient.sendCommand("bowtieUnfix", {
+          corridorName: args.name, baselineIndex: args.baselineIndex ?? 0, regionName: args.regionName,
+          merge: args.merge ?? true, restoreAssembly: args.restoreAssembly ?? true, rebuild: args.rebuild ?? true, dryRun: false,
+        }),
+      ),
+    },
+    // bowtie_unfix with dryRun: true resolves here - read-only, so no approval.
+    bowtie_unfix_preview: {
+      action: "bowtie_unfix_preview",
+      inputSchema: CorridorBowtieUnfixPreviewArgsSchema,
+      responseSchema: GenericCorridorResponseSchema,
+      capabilities: ["query"],
+      requiresActiveDrawing: true,
+      safeForRetry: true,
+      pluginMethods: ["bowtieUnfix"],
+      execute: async (args) => await withApplicationConnection(
+        async (appClient) => await appClient.sendCommand("bowtieUnfix", {
+          corridorName: args.name, baselineIndex: args.baselineIndex ?? 0, regionName: args.regionName,
+          merge: args.merge ?? true, restoreAssembly: args.restoreAssembly ?? true, rebuild: false, dryRun: true,
+        }),
+      ),
     },
     // bowtie_seam with dryRun: true resolves here - read-only, so no approval.
     bowtie_seam_preview: {
@@ -1507,6 +1669,9 @@ export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
         "bowtie_seam",
         "bowtie_seam_preview",
         "bowtie_fix",
+        "bowtie_bends",
+        "bowtie_unfix",
+        "bowtie_unfix_preview",
         "bowtie_refresh",
         "bowtie_refresh_preview",
         "bowtie_check",

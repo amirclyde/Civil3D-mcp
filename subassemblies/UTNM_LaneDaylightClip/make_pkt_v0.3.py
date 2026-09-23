@@ -21,18 +21,9 @@ Behaviour:
     gives the unclipped geometry.
 
   * Clip level (optional elevation target "ClipElev", v0.3): map the SAME valley feature line(s) here as on ClipTarget.
-    Where both are found, the section ends at the clip offset AT THE FEATURE LINE'S LEVEL instead of on its own slope,
+    Where both are found, the clipped link ends at the clip offset AT THE FEATURE LINE'S LEVEL instead of on its own slope,
     so the two sides of a bend, and every section converging on a curve centre, end on the same XYZ and the surface is
-    continuous. Without ClipElev the v0.2 behaviour is unchanged.
-
-  * Spread From Hinge (Yes / No, default Yes, v0.4): how the section gets to that level. Yes: the move is spread over the
-    whole daylight side - every slope and bench from the hinge to the clip takes the same extra grade g, so no single link
-    is bent (a 1 m bench or a short last link taking the whole move becomes a steep stub). The slope and bench
-    breakpoints stay at the offsets the engineer's slopes give them. g comes from an auxiliary pass laid out at the hinge on
-    the engineer's own slopes (the part's own level at the clip offset, and every "daylight here / clip first" decision),
-    so the real points only differ from the design by g x distance from the hinge. No: only the clipped link changes
-    slope, as v0.3. A clip inside the lane or behind the hinge always takes the level on that one link. Where g makes a
-    slope steeper than designed, or reverses a bench's fall, the bowtie tools flag it for the engineer.
+    continuous. Only the last link changes slope. Without ClipElev the v0.2 behaviour is unchanged.
 
 Link codes follow LinkWidthAndSlope / DaylightBench: lane Top/Datum, slope links before a bench
 Top/Daylight/Slope_Link/Datum, bench links Top/Bench/Datum, the final daylight link Top/Daylight/Daylight_Cut|Fill/Datum.
@@ -40,13 +31,12 @@ Top/Daylight/Slope_Link/Datum, bench links Top/Bench/Datum, the final daylight l
 import os, sys, uuid, zipfile
 
 NAME = "UTNM_LaneDaylightClip"
-VERSION = "0.4"
+VERSION = "0.3"
 MAX_SEGMENTS = 4
 DESCRIPTION = ("UTNM optional lane + daylight with benches (LinkWidthAndSlope + DaylightBench behaviour) plus an "
                "optional clip offset target for bowtie fixes: where the ClipTarget is crossed, the lane, slope or bench "
                "stops at the clip line and ends in point code Valley: on its own slope, or at the level of the optional "
-               "ClipElev elevation target (map the same valley feature line on both), with the move spread over the slopes and "
-               "benches from the hinge (Spread From Hinge). Without a target it behaves like the stock parts.")
+               "ClipElev elevation target (map the same valley feature line on both). Without a target it behaves like the stock parts.")
 GUID = uuid.uuid4().hex
 OUT_DIR = sys.argv[1] if len(sys.argv) > 1 else "."
 
@@ -61,11 +51,6 @@ PARAMS = [
     ("BenchWidth", "double", "Bench Width", "Width of each bench", 1.0),
     ("BenchSlope", "grade", "Bench Slope", "Bench cross slope. Positive slopes upward in the direction of increasing offset", 0.02),
 ]
-YESNO_PARAMS = [  # name, display, description, default (Yes = 10, No = 11: Composer's own enum values)
-    ("SpreadFromHinge", "Spread From Hinge", "Yes: where ClipElev takes the section to the valley level, every slope and bench from the hinge takes the same extra grade (no link is bent on its own). No: only the clipped link changes slope (v0.3).", "Yes"),
-]
-YESNO_VALUE = {"Yes": 10, "No": 11}
-VARIABLES = []     # Double flowchart variables (the spread grade of each daylight subtree)
 TYPE_XAML = {"double": "x:Double", "slope": "asw:Slope", "grade": "asw:Grade"}
 TYPE_INFO = {"double": 16, "slope": 10, "grade": 9}
 
@@ -180,22 +165,6 @@ def link(lid, a, b, codes):
     return build
 
 
-def variable(name, expr):
-    """A Double flowchart variable set to expr (InternalVariableDefine, as UTNMBench v0.2 uses)."""
-    aid = Ids.next_activity()
-    VARIABLES.append(name)
-
-    def build(pad):
-        return (f'{pad}<asa2:InternalVariableDefine ActivityId="{aid}" DisplayName="{name} &lt;Double&gt;" '
-                'sap:VirtualizedContainerService.HintSize="200,22" OldVariableName="" ShowErrors="True" '
-                'SubassemblyErrorCenter="[SubassemblyErrorCenter]" SubassemblyRunMode="[SubassemblyRunMode]" '
-                f'VariableName="{name}" VariableType="Double"><asa2:InternalVariableDefine.DefaultValue>'
-                f'<InArgument x:TypeArguments="x:Double">[{esc(expr)}]</InArgument></asa2:InternalVariableDefine.DefaultValue>'
-                f'<asa2:InternalVariableDefine.Variable><OutArgument x:TypeArguments="x:Double">[{name}]</OutArgument>'
-                f'</asa2:InternalVariableDefine.Variable>\n' + viewstate(pad + "  ") + f'\n{pad}</asa2:InternalVariableDefine>')
-    return build
-
-
 # ---------------------------------------------------------------- flowchart tree
 class Step:
     def __init__(self, activity, nxt=None):
@@ -288,20 +257,12 @@ def dist(p):
 
 
 class Ctx:
-    """Cut/fill expressions for one daylight subtree: ap = surface probe at the hinge, h = hinge point.
-    sl / bs: the engineer's slope and bench slope; ssl / sbs: the same with the spread grade g added (g = 0 without a
-    ClipElev clip, or with Spread From Hinge = No). run = plan length of one full slope (the breakpoints stay there)."""
-    def __init__(self, ap, h, g):
+    """Cut/fill expressions for one daylight subtree: ap = surface probe at the hinge, h = hinge point."""
+    def __init__(self, ap, h):
         self.cut = f"({ap}.Y > {h}.Y)"
-        self.sign = f"If({self.cut}, 1.0, -1.0)"
-        self.sl = f"({self.sign} * If({self.cut}, CutSlope * 1.0, FillSlope * 1.0))"
+        self.sl = f"(If({self.cut}, 1.0, -1.0) * If({self.cut}, CutSlope * 1.0, FillSlope * 1.0))"
         self.maxh = f"If({self.cut}, MaxCutHeight, MaxFillHeight)"
         self.cutfill_code = ("expr", f'If({self.cut}, "Daylight_Cut", "Daylight_Fill")')
-        self.run = f"({self.maxh} / Math.Abs({self.sl}))"
-        self.g = g
-        self.ssl = f"({self.sl} + {g})"
-        self.sbs = f"(BenchSlope * 1.0 + {g})"
-        self.dry = []      # (stage start aux point, probe aux point) per slope stage, on the engineer's own slopes
 
 
 def clip_dy(frm, slope_expr, dx_expr):
@@ -318,23 +279,16 @@ def clipped_end(frm, slope_expr, link_codes):
                  link(Names.L(), frm, v, link_codes), None)
 
 
-def dry_ok(c, k):
-    """Does stage k daylight (on the engineer's own slopes)? From the auxiliary pass laid out at the hinge."""
-    ad, ap = c.dry[k - 1]
-    return f"{ap}.IsValid" if k == MAX_SEGMENTS else f"{ap}.IsValid AndAlso Math.Abs({ap}.Y - {ad}.Y) <= {c.maxh} + 0.0001"
-
-
 def segment(c, k, hinge):
-    """Slope segment k starting at real point `hinge`. Every decision is read from the auxiliary pass (the engineer's own
-    slopes), so the spread never changes which way the section goes; the real links carry the spread grade."""
-    ad, ap = c.dry[k - 1]
-    daylight_ok = dry_ok(c, k)
+    """Slope segment k starting at real point `hinge`."""
+    ap = Names.AP()
+    daylight_ok = f"{ap}.IsValid" if k == MAX_SEGMENTS else f"{ap}.IsValid AndAlso Math.Abs({ap}.Y - {hinge}.Y) <= {c.maxh} + 0.0001"
 
     d = Names.P()
     daylight_branch = Decision(
         f"ClipTarget.IsValid AndAlso {dist(ap)} > {CLIPD}",
-        true=clipped_end(hinge, c.ssl, ["Top", "Datum", "Clip", "Daylight"]),
-        false=chain(point(d, "SlopeToSurface", hinge, ["Daylight", c.cutfill_code], slope=f"[{c.ssl}]"),
+        true=clipped_end(hinge, c.sl, ["Top", "Datum", "Clip", "Daylight"]),
+        false=chain(point(d, "SlopeToSurface", hinge, ["Daylight", c.cutfill_code], slope=f"[{c.sl}]"),
                     link(Names.L(), hinge, d, ["Top", "Daylight", c.cutfill_code, "Datum"]), None),
         true_label="Clip on slope", false_label="Daylight")
 
@@ -342,62 +296,36 @@ def segment(c, k, hinge):
         bench_branch = None
     else:
         bi, bo = Names.P(), Names.P()
-        slope_to_bench_end = f"{dist(hinge)} + {c.run}"
+        slope_to_bench_end = f"{dist(hinge)} + {c.maxh} / Math.Abs({c.sl})"
         after_bench = Decision(
             f"ClipTarget.IsValid AndAlso {dist(bi)} + BenchWidth > {CLIPD}",
-            true=clipped_end(bi, c.sbs, ["Top", "Datum", "Clip", "Bench"]),
-            false=chain(point(bo, "DeltaXAndDeltaY", bi, ["Bench_Out"], dx="[BenchWidth]", dy=f"[BenchWidth * {c.sbs}]"),
+            true=clipped_end(bi, "BenchSlope * 1.0", ["Top", "Datum", "Clip", "Bench"]),
+            false=chain(point(bo, "DeltaXAndDeltaY", bi, ["Bench_Out"], dx="[BenchWidth]", dy="[BenchWidth * BenchSlope]"),
                         link(Names.L(), bi, bo, ["Top", "Bench", "Datum"]),
                         segment(c, k + 1, bo)),
             true_label="Clip on bench", false_label="Bench")
-        # the bench starts where the engineer's slope reaches its max height: same offset, level moved by the spread
         bench_branch = Decision(
             f"ClipTarget.IsValid AndAlso {slope_to_bench_end} > {CLIPD}",
-            true=clipped_end(hinge, c.ssl, ["Top", "Datum", "Clip", "Daylight"]),
-            false=chain(point(bi, "DeltaXAndDeltaY", hinge, ["Bench_In"], dx=f"[{c.run}]", dy=f"[{c.sign} * {c.maxh} + {c.g} * {c.run}]"),
+            true=clipped_end(hinge, c.sl, ["Top", "Datum", "Clip", "Daylight"]),
+            false=chain(point(bi, "SlopeAndDeltaY", hinge, ["Bench_In"], slope=f"[{c.sl}]", dy=f"[If({c.cut}, 1.0, -1.0) * {c.maxh}]"),
                         link(Names.L(), hinge, bi, ["Top", "Daylight", "Slope_Link", "Datum"]),
                         after_bench),
             true_label="Clip on slope", false_label="Bench")
 
-    return Decision(daylight_ok, true=daylight_branch, false=bench_branch, true_label="Daylight here", false_label="Bench")
-
-
-def spread_pass(c, h):
-    """The auxiliary pass at the hinge: the start of every slope stage on the engineer's own slopes (analytic: a full slope
-    of run x MaxHeight, then a bench), a ground probe from each, and the spread grade g (a flowchart variable)."""
-    acts = []
-    per = f"({c.run} + BenchWidth)"
-    rise = f"({c.sign} * {c.maxh} + BenchWidth * BenchSlope)"
-    for k in range(1, MAX_SEGMENTS + 1):
-        ad, ap = Names.AP(), Names.AP()
-        acts.append(point(ad, "DeltaXAndDeltaY", h, [], aux=True, dx=f"[{k - 1} * {per}]", dy=f"[{k - 1} * {rise}]"))
-        acts.append(point(ap, "SlopeToSurface", ad, [], aux=True, slope=f"[{c.sl}]"))
-        c.dry.append((ad, ap))
-    # where the section would stop on its own: the first stage that daylights, else the start of the last stage
-    stop = f"{dist(c.dry[-1][0])}"
-    for k in range(MAX_SEGMENTS, 0, -1):
-        stop = f"If({dry_ok(c, k)}, {dist(c.dry[k - 1][1])}, {stop})"
-    t = f"({CLIPD} - {dist(h)})"
-    n = f"Math.Floor({t} / {per})"
-    rem = f"({t} - {n} * {per})"
-    own = f"({n} * {rise} + If({rem} <= {c.run}, {c.sl} * {rem}, {c.sign} * {c.maxh} + ({rem} - {c.run}) * BenchSlope))"
-    clipped = (f"SpreadFromHinge = Yes AndAlso ClipTarget.IsValid AndAlso ClipElev.IsValid AndAlso {t} > 0.01 "
-               f"AndAlso {CLIPD} < {stop} - 0.0001")
-    acts.append(variable(c.g, f"If({clipped}, (ClipElev.Elevation - {h}.Elevation - {own}) / {t}, 0.0)"))
-    return acts
+    probe = point(ap, "SlopeToSurface", hinge, [], aux=True, slope=f"[{c.sl}]")
+    return chain(probe, Decision(daylight_ok, true=daylight_branch, false=bench_branch,
+                                 true_label="Daylight here", false_label="Bench"))
 
 
 def daylight(frm):
-    """Hinge at real point `frm` (lane end or P1): surface probe, coded hinge point, the auxiliary pass and spread grade,
-    clip-behind-hinge check, slopes."""
+    """Hinge at real point `frm` (lane end or P1): surface probe, coded hinge point, clip-behind-hinge check, slopes."""
     ap = Names.AP()
     h = Names.P()
-    c = Ctx(ap, h, f"SpreadG{len(VARIABLES) + 1}")
+    c = Ctx(ap, h)
     hinge_codes = ["Hinge", ("expr", f'If({ap}.Y > {frm}.Y, "Hinge_Cut", "Hinge_Fill")')]
     v = Names.P()
     return chain(point(ap, "DeltaXOnSurface", frm, [], aux=True, dx="0", layout_dy="1"),
                  point(h, "DeltaXAndDeltaY", frm, hinge_codes, dx="0", dy="0"),
-                 *spread_pass(c, h),
                  Decision(f"ClipTarget.IsValid AndAlso {CLIPD} <= {dist(h)} + 0.001",
                           true=chain(point(v, "DeltaXAndDeltaY", h, ["Valley"], dx="0", dy="0"), None),
                           false=segment(c, 1, h),
@@ -436,7 +364,6 @@ def build_xaml():
             defaults += f' this:Subassembly.{name}="[new Grade({default})]"'
         else:
             defaults += f' this:Subassembly.{name}="{default}"'
-    defaults += "".join(f' this:Subassembly.{n}="[new EnumType({YESNO_VALUE[df]}, &quot;{df}&quot;, &quot;YesNo&quot;)]"' for n, _, _, df in YESNO_PARAMS)
     defaults += (' this:Subassembly.SurfaceTarget="[new PreviewSurfaceTarget(&quot;SurfaceTarget&quot;, True, 1000, 2, -1000, 2)]"'
                  ' this:Subassembly.ClipTarget="[new PreviewOffsetTarget(&quot;ClipTarget&quot;, False, 6)]"'
                  ' this:Subassembly.ClipElev="[new PreviewElevationTarget(&quot;ClipElev&quot;, False, 1)]"')
@@ -458,15 +385,6 @@ def build_xaml():
             f'        <asw:Description2Attribute Description="{esc(desc)}" />\n'
             f'      </x:Property.Attributes>\n'
             f'    </x:Property>')
-    for name, display, desc, _ in YESNO_PARAMS:
-        members.append(
-            f'    <x:Property Name="{name}" Type="InArgument(asw:EnumType)">\n'
-            f'      <x:Property.Attributes>\n'
-            f'        <asw:EnabledFlag2Attribute EnabledFlag="True" />\n'
-            f'        <asw:DisplayName2Attribute DisplayName="{esc(display)}" />\n'
-            f'        <asw:Description2Attribute Description="{esc(desc)}" />\n'
-            f'      </x:Property.Attributes>\n'
-            f'    </x:Property>')
     for name, typ, display in (("SurfaceTarget", "asw:SurfaceTarget", "Daylight Surface"),
                                ("ClipTarget", "asw:OffsetTarget", "Clip Offset Target"),
                                ("ClipElev", "asw:ElevationTarget", "Clip Level Target")):
@@ -478,11 +396,11 @@ def build_xaml():
             f'      </x:Property.Attributes>\n'
             f'    </x:Property>')
 
-    body = serialize(tree, 0)
     variables = "\n".join(
         f'      <Variable x:TypeArguments="asw:EnumType" Default="[new EnumType({v}, &quot;{n}&quot;)]" Modifiers="ReadOnly" Name="{n}" />'
         for v, n in ENUM_VARIABLES)
-    variables += "".join(f'\n      <Variable x:TypeArguments="x:Double" Name="{v}" />' for v in VARIABLES)
+
+    body = serialize(tree, 0)
     refs = "\n".join(f'    <x:Reference>{r}</x:Reference>' for r in REFS)
 
     return (
@@ -531,9 +449,6 @@ def build_atc():
     for name, typ, display, desc, default in PARAMS:
         params.append(f'            <{name} DataType="double" TypeInfo="{TYPE_INFO[typ]}" DisplayName="{esc(display)}" '
                       f'Description="{esc(desc)}">{default}</{name}>')
-    for name, display, desc, default in YESNO_PARAMS:
-        params.append(f'            <{name} DataType="long" TypeInfo="16" DisplayName="{esc(display)}" Description="{esc(desc)}">{YESNO_VALUE[default]}'
-                      f'<Enum><Yes DisplayName="Yes">10</Yes><No DisplayName="No">11</No></Enum></{name}>')
     return (xml_decl() +
             '<Category xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">\n'
             f'  <ItemID idValue="{{{uuid.uuid4()}}}" />\n'
@@ -569,7 +484,7 @@ def build_cfg():
 def build_emd():
     return (xml_decl() +
             '<EnumData xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">\n'
-            '  <EnumDatas>\n    <Groups />\n    <DefinedVariables>' + "".join(f"\n      <string>{v}</string>" for v in VARIABLES) + '\n    </DefinedVariables>\n  </EnumDatas>\n</EnumData>')
+            '  <EnumDatas>\n    <Groups />\n    <DefinedVariables />\n  </EnumDatas>\n</EnumData>')
 
 
 def build_cdmd():

@@ -47,6 +47,22 @@ public static partial class CorridorBowtieCommands
     var snapshotPath = PluginRuntime.GetOptionalString(parameters, "snapshotPath");
     var allStations = PluginRuntime.GetOptionalBool(parameters, "allStations") ?? false;
     var maxLevelAdjust = PluginRuntime.GetOptionalDouble(parameters, "maxLevelAdjust") ?? 0.30;
+    var acceptOffSurfaceEnds = PluginRuntime.GetOptionalBool(parameters, "acceptOffSurfaceEnds") ?? false;
+    // how the clip part takes a link to the valley level: hinge (spread, UTNM_LaneDaylightClip v0.4 with Spread From
+    // Hinge = Yes), last_link (v0.3, or Spread From Hinge = No), auto = read it from the clip assembly
+    var adjustFromArg = (PluginRuntime.GetOptionalString(parameters, "adjustFrom") ?? "auto").Trim().ToLowerInvariant();
+    var detectAssembly = PluginRuntime.GetOptionalString(parameters, "clipAssembly");
+    var levelRuleArg = (PluginRuntime.GetOptionalString(parameters, "levelRule") ?? "no_steeper").Trim().ToLowerInvariant();
+    if (adjustFromArg is not ("auto" or "hinge" or "last_link"))
+      throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "adjustFrom must be auto, hinge or last_link.");
+    if (levelRuleArg is not ("no_steeper" or "mean"))
+      throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "levelRule must be no_steeper (default: no slope steeper than designed) or mean.");
+    // recorded on the valley line so bowtie_unfix can put the region back later (bowtie_fix passes them)
+    var fixParent = PluginRuntime.GetOptionalString(parameters, "parentRegion");
+    var fixAssembly = PluginRuntime.GetOptionalString(parameters, "parentAssembly");
+    var fixBefore = PluginRuntime.GetOptionalString(parameters, "splitBefore");
+    var fixAfter = PluginRuntime.GetOptionalString(parameters, "splitAfter");
+    static string Clean(string? v) => (v ?? "").Replace(";", ",").Replace("=", "-");
     var writeAs = (PluginRuntime.GetOptionalString(parameters, "writeAs") ?? "feature_line").Trim().ToLowerInvariant();
     if (writeAs is not ("feature_line" or "alignment"))
       throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "writeAs must be feature_line (default: the valley line with its levels) or alignment.");
@@ -87,13 +103,24 @@ public static partial class CorridorBowtieCommands
       var sections = new List<K.SectionSample>();
       var clipped = new List<double>();
       var unread = new List<double>();
+      var boundaries = 0;
       foreach (var s in stations)
       {
         if (s < from - StationTolerance || s > to + StationTolerance) continue;
-        var sample = ReadSeamSection(baseline, s, sign, linkCode);
-        if (sample == null) { unread.Add(s); continue; }
-        if (sample.Clipped) clipped.Add(s);
-        sections.Add(sample);
+        // where one region ends and the next starts, both sections are read (in station order of their regions), so the
+        // kernel sees the change of section as the step it is instead of blending the two
+        var applied = AppliedAssembliesAt(baseline, s);
+        if (applied.Count > 1) boundaries++;
+        var any = false;
+        foreach (var a in applied)
+        {
+          var sample = ReadSeamSection(a, s, sign, linkCode);
+          if (sample == null) continue;
+          any = true;
+          if (sample.Clipped && !clipped.Contains(s)) clipped.Add(s);
+          sections.Add(sample);
+        }
+        if (!any) unread.Add(s);
       }
       if (sections.Count < 2)
         throw new JsonRpcDispatchException("CIVIL3D.INVALID_STATE", $"Fewer than two sections with {linkCode}-coded links on the {side} side between {from:0.###} and {to:0.###}. Rebuild the corridor, or check linkCode.");
@@ -109,6 +136,16 @@ public static partial class CorridorBowtieCommands
       {
         var sf = surface;
         ground = (x, y) => { try { return sf.FindElevationAtXY(x, y); } catch { return null; } };
+        // where each section ends against the real surface: the kernel decides from it whether a section ends on the
+        // ground, and an offline snapshot carries it because its ground grid is only an approximation of the surface
+        var kSide = sign < 0 ? K.Side.Left : K.Side.Right;
+        foreach (var sec in sections)
+        {
+          var (c, th) = samples.At(sec.Station);
+          var q = c + K.SampledBaseline.InsideNormal(th, kSide) * sec.Reach;
+          var g = ground(q.X, q.Y);
+          if (g.HasValue) sec.EndGap = sec.Z0 + sec.Template[^1].Dz - g.Value;
+        }
       }
       else warnings.Add("No daylight surface (pass surfaceName, or map a surface target in the region): the seam end is taken from where the sections stop covering the same ground.");
 
@@ -118,7 +155,7 @@ public static partial class CorridorBowtieCommands
         {
           Corridor = corridor.Name, Baseline = baseline.Name, BendFrom = startStation, BendTo = endStation,
           Samples = new K.Snapshot.BaselineDto { S = samples.S, X = samples.X, Y = samples.Y, Dir = samples.Th },
-          Sections = sections.Select(x => new K.Snapshot.SectionDto { Station = x.Station, Z0 = x.Z0, Clipped = x.Clipped, Template = x.Template.Select(p => new[] { p.Off, p.Dz }).ToList() }).ToList(),
+          Sections = sections.Select(x => new K.Snapshot.SectionDto { Station = x.Station, Z0 = x.Z0, Clipped = x.Clipped, EndGap = x.EndGap, HingeAt = x.HingeAt, Template = x.Template.Select(p => new[] { p.Off, p.Dz }).ToList() }).ToList(),
           Ground = ground == null ? null : SeamGroundGrid(samples, sections, sign, ground),
         };
         var json = JsonSerializer.Serialize(snap, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, WriteIndented = false, NumberHandling = System.Text.Json.Serialization.JsonNumberHandling.AllowNamedFloatingPointLiterals });
@@ -132,7 +169,16 @@ public static partial class CorridorBowtieCommands
           "The seam is only ever computed from unclipped sections. Unmap the ClipTarget in that region (or put the stock assembly back), rebuild, and run this again. Nothing was changed.");
 
       // ---------------------------------------------------------------- solve
-      var options = new K.SolveOptions { Step = step, CapInset = capInset, MaxLevelStep = maxLevelStep, LevelFromTarget = levelFromTarget, MaxLevelAdjust = maxLevelAdjust };
+      var regionForParts = RegionAtStation(baseline, 0.5 * (startStation + endStation));
+      var adjustFrom = adjustFromArg != "auto" ? adjustFromArg
+        : DetectAdjustFrom(civilDoc, transaction, detectAssembly, regionForParts, side, warnings);
+      var options = new K.SolveOptions
+      {
+        Step = step, CapInset = capInset, MaxLevelStep = maxLevelStep, LevelFromTarget = levelFromTarget, MaxLevelAdjust = maxLevelAdjust,
+        AcceptOffSurfaceEnds = acceptOffSurfaceEnds,
+        AdjustFrom = adjustFrom == "hinge" ? K.AdjustFrom.FromHinge : K.AdjustFrom.LastLink,
+        LevelRule = levelRuleArg == "mean" ? K.LevelRule.Mean : K.LevelRule.NoSteeper,
+      };
       var result = K.SeamSolver.Solve(samples, new K.SectionSet(sections, extension), ground, startStation, endStation, options, from, to);
       warnings.AddRange(result.Warnings);
 
@@ -183,7 +229,8 @@ public static partial class CorridorBowtieCommands
           $"{SeamDescriptionTag}; role={role}; corridor={corridor.Name.Replace(";", ",")}; baseline={baselineIndex}; side={side}; bend={result.BendType}; " +
           $"range={startStation.ToString("0.####", inv)}|{endStation.ToString("0.####", inv)}; step={step.ToString("0.####", inv)}; extension={extension.ToString("0.####", inv)}; " +
           $"capInset={capInset.ToString("0.####", inv)}; linkCode={linkCode}; surface={(surfaceUsed ?? "").Replace(";", ",")}; partner={partner.Replace(";", ",")}; " +
-          $"stations={string.Join("|", addedList.Select(x => x.ToString("0.####", inv)))}";
+          $"stations={string.Join("|", addedList.Select(x => x.ToString("0.####", inv)))}; region={Clean(region?.Name)}; parent={Clean(fixParent)}; parentAssembly={Clean(fixAssembly)}; " +
+          $"before={Clean(fixBefore)}; after={Clean(fixAfter)}";
         // levels: the seam's own level at each point; the apex point and the apex bar at the level the arc sections arrive at
         double firstZ = result.Seam.Select(q => q.Z).FirstOrDefault(z => !double.IsNaN(z));
         var apexZ = result.ApexZ ?? firstZ;
@@ -239,15 +286,21 @@ public static partial class CorridorBowtieCommands
         ["dryRun"] = dryRun,
         ["side"] = side,
         ["surface"] = surfaceUsed,
-        ["region"] = region == null ? null : new Dictionary<string, object?> { ["name"] = region.Name, ["start"] = Math.Round(region.StartStation, 4), ["end"] = Math.Round(region.EndStation, 4) },
-        ["snapshot"] = new Dictionary<string, object?> { ["from"] = Math.Round(from, 3), ["to"] = Math.Round(to, 3), ["baselineSamples"] = samples.S.Length, ["anglePoints"] = samples.Corners.Select(c => Math.Round(c.Station, 4)).ToList(), ["sections"] = sections.Count },
+        ["region"] = region == null ? null : new Dictionary<string, object?> { ["name"] = region.Name, ["start"] = Math.Round(region.StartStation, 4), ["end"] = Math.Round(region.EndStation, 4), ["assemblyName"] = AssemblyName(transaction, SafeAssemblyId(region)) },
+        ["snapshot"] = new Dictionary<string, object?> { ["from"] = Math.Round(from, 3), ["to"] = Math.Round(to, 3), ["baselineSamples"] = samples.S.Length, ["anglePoints"] = samples.Corners.Select(c => Math.Round(c.Station, 4)).ToList(), ["sections"] = sections.Count, ["regionBoundariesRead"] = boundaries },
         ["result"] = report,
+        // the design as given changes section in or next to this bend: solved as it stands, and listed so it can be highlighted
+        // for the engineer: the design as given changes section in or next to this bend (solved as it stands), and links the
+        // level move would make steeper than designed (need remedial or extra slope protection) or whose fall it reverses
+        ["highlight"] = Highlight(result),
         ["blocking"] = blocking,
         ["wouldWrite"] = dryRun ? new Dictionary<string, object?> { ["seam"] = writeSeam ? seamAlignmentName : null, ["cap"] = writeCap ? capAlignmentName : null, ["meetStations"] = new[] { result.MeetA, result.MeetB } } : null,
         ["written"] = alignments,
         ["stationsAdded"] = stationsAdded,
         ["rebuilt"] = false,
         ["levelFromTarget"] = levelFromTarget,
+        ["adjustFrom"] = adjustFrom,
+        ["levelRule"] = levelRuleArg,
         ["nextStep"] = alignments.Count == 0 ? null :
           $"Give the region an assembly with UTNM_LaneDaylightClip{(levelFromTarget ? " v0.3" : "")} on the {side} side, then map ClipTarget{(levelFromTarget ? " AND ClipElev" : "")} to {string.Join(" and ", targets.Select(n => $"'{n}'"))} " +
           $"(target_mapping_set: targetType {writeAs}, targetName + targetNames, targetToOption Nearest{(levelFromTarget ? "; the same objects and option on both targets" : "")}) and rebuild; then run bowtie_check.",
@@ -302,6 +355,30 @@ public static partial class CorridorBowtieCommands
   {
     AppliedAssembly applied;
     try { applied = baseline.GetAppliedAssemblyAtStation(s); } catch { return null; }
+    return ReadSeamSection(applied, s, sign, linkCode);
+  }
+
+  /// <summary>Every applied section at a station: one, or two where one region ends and the next starts there (the first
+  /// region's first). Falls back to the baseline's own lookup when no region answers.</summary>
+  private static List<AppliedAssembly> AppliedAssembliesAt(Baseline baseline, double s)
+  {
+    var found = new List<(double Start, AppliedAssembly A)>();
+    var regions = baseline.BaselineRegions;
+    for (var i = 0; i < regions.Count; i++)
+    {
+      var r = regions[i];
+      if (s < r.StartStation - StationTolerance || s > r.EndStation + StationTolerance) continue;
+      try { var a = r.AppliedAssemblies.GetItemAt(s); if (a != null) found.Add((r.StartStation, a)); } catch { }
+    }
+    if (found.Count == 0)
+    {
+      try { return new List<AppliedAssembly> { baseline.GetAppliedAssemblyAtStation(s) }; } catch { return new List<AppliedAssembly>(); }
+    }
+    return found.OrderBy(x => x.Start).Select(x => x.A).ToList();
+  }
+
+  private static K.SectionSample? ReadSeamSection(AppliedAssembly applied, double s, double sign, string linkCode)
+  {
     var z0 = BaselineElevation(applied);
     if (!z0.HasValue) return null;
 
@@ -319,8 +396,14 @@ public static partial class CorridorBowtieCommands
     }
     if (segs.Count == 0) return null;
     var clipped = false;
+    double? hingeAt = null;
     foreach (CalculatedPoint p in applied.Points)
-      if (sign * p.StationOffsetElevationToBaseline.Y > 1e-6 && HasCode(p.CorridorCodes, "Valley")) clipped = true;
+    {
+      var off = sign * p.StationOffsetElevationToBaseline.Y;
+      if (off > 1e-6 && HasCode(p.CorridorCodes, "Valley")) clipped = true;
+      // the subassembly's own hinge (LaneDaylightClip, DaylightBench and UTNMBench code it): the nearest on this side
+      if (off > -1e-6 && HasCode(p.CorridorCodes, "Hinge") && (!hingeAt.HasValue || off < hingeAt.Value)) hingeAt = off;
+    }
 
     segs.Sort((u, v) => u.A.O.CompareTo(v.A.O));
     var used = new bool[segs.Count];
@@ -343,7 +426,7 @@ public static partial class CorridorBowtieCommands
       if (Math.Abs(segs[next].A.O - end.O) > 1e-4 || Math.Abs(segs[next].A.Z - end.Z) > 1e-4) chain.Add(segs[next].A);
       chain.Add(segs[next].B);
     }
-    var sample = new K.SectionSample { Station = s, Z0 = z0.Value, Clipped = clipped };
+    var sample = new K.SectionSample { Station = s, Z0 = z0.Value, Clipped = clipped, HingeAt = hingeAt };
     foreach (var p in chain)
     {
       if (sample.Template.Count > 0 && p.O < sample.Template[^1].Off - 1e-6) continue;

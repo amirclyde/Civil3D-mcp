@@ -26,7 +26,8 @@ const double Deg = Math.PI / 180;
 
 // A lane to the hinge, then one daylight slope to the ground (fill or cut decided at the hinge, like the stock part).
 SectionSet MakeSections(SampledBaseline bl, Side side, IEnumerable<double> stations, Func<double, double> profile,
-  Func<double, double, double> ground, double hinge = 3.0, double crossfall = -0.02, double slope = 0.5, Func<double, double>? hingeAt = null)
+  Func<double, double, double> ground, double hinge = 3.0, double crossfall = -0.02, double slope = 0.5, Func<double, double>? hingeAt = null,
+  Func<double, double>? startAt = null)
 {
   var list = new List<SectionSample>();
   foreach (var s in stations)
@@ -43,7 +44,8 @@ SectionSet MakeSections(SampledBaseline bl, Side side, IEnumerable<double> stati
     while (b < hg + 200 && D(b) * d0 > 0) { a = b; b += 0.05; }
     for (var i = 0; i < 60; i++) { var mid = 0.5 * (a + b); if (D(mid) * d0 > 0) a = mid; else b = mid; }
     var od = 0.5 * (a + b);
-    list.Add(new SectionSample { Station = s, Z0 = z0, Template = { (0, 0), (hg, crossfall * hg), (od, zh + k * (od - hg) - z0) } });
+    var st0 = startAt?.Invoke(s) ?? 0.0;
+    list.Add(new SectionSample { Station = s, Z0 = z0, Template = { (st0, crossfall * st0), (hg, crossfall * hg), (od, zh + k * (od - hg) - z0) } });
   }
   return new SectionSet(list);
 }
@@ -76,6 +78,7 @@ void Healthy(SeamResult r)
 }
 
 
+var OverlapCells = new List<(double X, double Y, string Feet)>();
 // Independent check of the whole point of the exercise: after clipping, is every piece of ground inside the bend covered by
 // exactly one section? Counted on a plan grid, using nothing from the solver but the per-station clip offsets.
 (double Before, double Overlap, double Gap) Coverage(SampledBaseline bl, SectionSet sec, SeamResult r, Side side, double cell = 0.2, double bias = 0.0)
@@ -86,7 +89,15 @@ void Healthy(SeamResult r)
     var i = st.FindIndex(x => x.Station >= s);
     double Of(StationClip x) => x.ClipOffset.HasValue ? x.ClipOffset.Value + bias : x.Reach;
     if (i <= 0) return Of(i == 0 ? st[0] : st[^1]);
-    var a = st[i - 1]; var b = st[i]; var w = (s - a.Station) / (b.Station - a.Station);
+    var a = st[i - 1]; var b = st[i];
+    // never interpolate across an angle point: each leg's clip runs down to the PI on its own side (the valley starts there)
+    var corner = bl.Corners.Where(c => c.Station > a.Station && c.Station < b.Station).Select(c => (double?)c.Station).FirstOrDefault();
+    if (corner.HasValue)
+    {
+      if (s <= corner.Value) { var wa = (s - a.Station) / (corner.Value - a.Station); var ca = a.ClipOffset.HasValue ? bias : Of(a); return Of(a) * (1 - wa) + ca * wa; }
+      var wb = (s - corner.Value) / (b.Station - corner.Value); var cb = b.ClipOffset.HasValue ? bias : Of(b); return cb * (1 - wb) + Of(b) * wb;
+    }
+    var w = (s - a.Station) / (b.Station - a.Station);
     return Of(a) * (1 - w) + Of(b) * w;
   }
   var from = st[0].Station + 2; var to = st[^1].Station - 2;
@@ -103,7 +114,7 @@ void Healthy(SeamResult r)
       var natural = feet.Count(f => f.Offset <= sec.Reach(f.S));
       if (natural == 0) continue;
       if (natural > 1) before += cell * cell;
-      if (feet.Count(f => f.Offset <= Clip(f.S) - 0.05) > 1) overlap += cell * cell;
+      if (feet.Count(f => f.Offset <= Clip(f.S) - 0.05) > 1) { overlap += cell * cell; OverlapCells.Add((x, y, string.Join(",", feet.Where(f => f.Offset <= Clip(f.S) - 0.05).Select(f => $"{f.S:0.00}@{f.Offset:0.00}/{Clip(f.S):0.00}")))); }
       if (all.Count(f => f.Offset <= Clip(f.S) + 0.05) == 0) gap += cell * cell;
     }
   return (before, overlap, gap);
@@ -113,10 +124,32 @@ void Healthy(SeamResult r)
 if (args.Length >= 2 && args[0] == "solve")
 {
   var snap = Snapshot.Load(args[1]);
-  var res = SeamSolver.Solve(snap.ToBaseline(), snap.ToSections(), snap.ToGround(), snap.BendFrom, snap.BendTo, new SolveOptions { LevelFromTarget = args.Contains("--level") });
+  var res = SeamSolver.Solve(snap.ToBaseline(), snap.ToSections(), snap.ToGround(), snap.BendFrom, snap.BendTo, new SolveOptions { LevelFromTarget = args.Contains("--level"), GroundCell = snap.Ground?.Cell ?? 0,
+    AdjustFrom = args.Contains("--spread") ? AdjustFrom.FromHinge : AdjustFrom.LastLink, LevelRule = args.Contains("--mean") ? LevelRule.Mean : LevelRule.NoSteeper });
   var json = Snapshot.ToJson(ResultReport.Of(res));
   if (args.Length >= 3) File.WriteAllText(args[2], json); else Console.WriteLine(json);
+  if (args.Contains("--raw")) foreach (var q in res.SeamRaw) Console.WriteLine($"raw {q.Kind,-6} t={q.T:0.00} u={q.U:0.000} z={q.Z:0.000}  A {q.StationA:0.00}/{q.OffsetA:0.00}  B {q.StationB:0.00}/{q.OffsetB:0.00}");
   return res.Status == SeamStatus.Ok ? 0 : 1;
+}
+
+// ---------------------------------------------------------------------------------------------------- baseline
+
+// `dotnet run -- check a.json b.json ...` solves each snapshot as the plugin does (level from the valley line) and measures
+// the result independently: ground covered twice / left uncovered after the clip, crossings, the largest level move.
+if (args.Length >= 2 && args[0] == "check")
+{
+  foreach (var f in args.Skip(1).Where(a => !a.StartsWith("--")))
+  {
+    var snap = Snapshot.Load(f);
+    var bl = snap.ToBaseline(); var sec = snap.ToSections();
+    var res = SeamSolver.Solve(bl, sec, snap.ToGround(), snap.BendFrom, snap.BendTo, new SolveOptions { LevelFromTarget = true, GroundCell = snap.Ground?.Cell ?? 0,
+      AdjustFrom = args.Contains("--spread") ? AdjustFrom.FromHinge : AdjustFrom.LastLink, LevelRule = args.Contains("--mean") ? LevelRule.Mean : LevelRule.NoSteeper });
+    var cov = res.Stations.Count > 2 ? Coverage(bl, sec, res, res.Side, 0.25) : (0, 0, 0);
+    var bad = res.Stations.Where(x => x.AdjustedSlope.HasValue && Math.Abs(x.AdjustedSlope.Value - (x.OwnSlope ?? 0)) > 0.2).Select(x => x.Station).ToList();
+    Console.WriteLine($"{Path.GetFileNameWithoutExtension(f),-20} {res.Status,-16} cross {res.LinkCrossingsBefore,4} -> {res.LinkCrossingsAfter,-3} twice {cov.Item1:0.0} -> {cov.Item2:0.00} m2, gap {cov.Item3:0.00} m2, " +
+      $"move {res.MaxLevelAdjust:0.00} m, slope change {res.MaxSlopeChange*100:0}% (spread {res.MaxSpreadGrade*100:0.0}%), steeper at {res.SlopeFlags.Where(x => x.Kind == "steeper").Select(x => x.Station).Distinct().Count()} st, fall reversed at {res.SlopeFlags.Where(x => x.Kind == "fall_reversed").Select(x => x.Station).Distinct().Count()} st, end {res.SeamEnd}, open {res.OpenEnded}{(res.Reasons.Count > 0 ? " | " + res.Reasons[0][..Math.Min(80, res.Reasons[0].Length)] : "")}");
+  }
+  return 0;
 }
 
 // ---------------------------------------------------------------------------------------------------- baseline
@@ -321,6 +354,13 @@ Test("coverage check is not blind: clips 1 m short leave a gap, clips 1 m long l
   var shortBy = Coverage(bl, sec, r, Side.Left, bias: -1.0); var longBy = Coverage(bl, sec, r, Side.Left, bias: 1.0);
   Note($"1 m short: {shortBy.Gap:0.0} m2 uncovered; 1 m long: {longBy.Overlap:0.0} m2 covered twice");
   True(shortBy.Gap > 5 && longBy.Overlap > 5, "the coverage check did not react to a wrong clip");
+  // and at an angle point, where the check runs each leg down to the PI on its own side
+  var ba = AnglePoint(40, true);
+  var sa = MakeSections(ba, Side.Left, Every(130, 190, 1), s => 10 - 0.01 * (s - 130), (_, _) => 6);
+  var ra = SeamSolver.Solve(ba, sa, (_, _) => 6, 159, 161);
+  var ok = Coverage(ba, sa, ra, Side.Left); var sh = Coverage(ba, sa, ra, Side.Left, bias: -1.0); var lg = Coverage(ba, sa, ra, Side.Left, bias: 1.0);
+  Note($"angle point at 1 m spacing: as solved {ok.Overlap:0.00} m2 twice / {ok.Gap:0.00} m2 gap; 1 m short {sh.Gap:0.0} m2 gap; 1 m long {lg.Overlap:0.0} m2 twice");
+  True(ok.Overlap < 0.5 && ok.Gap < 0.5 && sh.Gap > 3 && lg.Overlap > 3, "the coverage check at an angle point is blind or wrong");
 });
 
 // ---------------------------------------------------------------------------------------------------- cut to fill
@@ -424,11 +464,11 @@ Test("climbing corner, lower leg in cut and upper leg in fill: the slopes pass e
 // ---------------------------------------------------------------------------------------------------- real drawings
 
 Console.WriteLine("snapshots from Civil 3D (BTC Road, GO-260809v5-bowtie-seam-fixture.dwg, 20 Sep 2026)");
-SeamResult SolveFixture(string file, double maxLevelStep = 0.30, bool levels = false)
+SeamResult SolveFixture(string file, double maxLevelStep = 0.30, bool levels = false, bool spread = false)
 {
   var snap = Snapshot.Load(Path.Combine(AppContext.BaseDirectory, "fixtures", file));
   var bl = snap.ToBaseline();
-  return SeamSolver.Solve(bl, snap.ToSections(3.0), snap.ToGround(), snap.BendFrom, snap.BendTo, new SolveOptions { Step = 0.1, MaxLevelStep = maxLevelStep, LevelFromTarget = levels }, bl.Start, bl.End);
+  return SeamSolver.Solve(bl, snap.ToSections(3.0), snap.ToGround(), snap.BendFrom, snap.BendTo, new SolveOptions { Step = 0.1, MaxLevelStep = maxLevelStep, LevelFromTarget = levels, AdjustFrom = spread ? AdjustFrom.FromHinge : AdjustFrom.LastLink, LevelRule = LevelRule.Mean, GroundCell = snap.Ground?.Cell ?? 0 }, bl.Start, bl.End);
 }
 Test("curve 1 (arc R15, cut, benched slopes): matches the Valley points Civil 3D built from it", () =>
 {
@@ -488,6 +528,34 @@ Test("with the level taken from the valley line (mean of the two sides): curve 2
   Near(c1.MaxLevelAdjust, 0, 0.005, "curve 1 is level and symmetric: nothing should move");
 });
 
+Test("level moves spread from the hinge (AdjustFrom.FromHinge): the short-link stubs go, and the limit is the slope change", () =>
+{
+  var last = SolveFixture("btc-road-curve2.json", levels: true);
+  var spread = SolveFixture("btc-road-curve2.json", levels: true, spread: true);
+  Note($"curve 2: largest slope change {last.MaxSlopeChange * 100:0.0}% with the last link taking the move, {spread.MaxSlopeChange * 100:0.0}% spread from the hinge");
+  True(last.MaxSlopeChange > 0.3, "the fixture's arc centre is on a 1 m bench: the last-link slope change should be large");
+  True(spread.Status == SeamStatus.Ok && spread.MaxSlopeChange < 0.05, $"spread: {spread.Status}, {spread.MaxSlopeChange:0.000}");
+  True(last.Warnings.Any(w => w.Contains("spread from the hinge")), "the last-link result must point to the stub");
+});
+
+Test("spread from the hinge: links made steeper than designed, and benches whose fall reverses, are flagged; the no-steeper level flags fewer", () =>
+{
+  SeamResult Run(LevelRule rule)
+  {
+    var snap = Snapshot.Load(Path.Combine(AppContext.BaseDirectory, "fixtures", "btc-road-curve2.json"));
+    var bl = snap.ToBaseline();
+    return SeamSolver.Solve(bl, snap.ToSections(3.0), snap.ToGround(), snap.BendFrom, snap.BendTo,
+      new SolveOptions { Step = 0.1, LevelFromTarget = true, AdjustFrom = AdjustFrom.FromHinge, LevelRule = rule, GroundCell = snap.Ground?.Cell ?? 0 }, bl.Start, bl.End);
+  }
+  var mean = Run(LevelRule.Mean); var ns = Run(LevelRule.NoSteeper);
+  int Steep(SeamResult r) => r.SlopeFlags.Where(f => f.Kind == "steeper").Select(f => f.Station).Distinct().Count();
+  Note($"curve 2: steeper than designed at {Steep(mean)} section(s) with the mean level, {Steep(ns)} with the no-steeper level; fall reversed at {mean.SlopeFlags.Count(f => f.Kind == "fall_reversed")} / {ns.SlopeFlags.Count(f => f.Kind == "fall_reversed")} link(s)");
+  True(Steep(mean) > 0, "the mean level lowers the fill side at some sections: those must be flagged");
+  True(mean.Warnings.Any(w => w.Contains("steeper than designed")), "the steeper slopes must be reported");
+  True(Steep(ns) < Steep(mean), "the no-steeper level should flag fewer sections");
+  foreach (var f in mean.SlopeFlags.Where(f => f.Kind == "steeper")) True(Math.Abs(f.NewGrade) > Math.Abs(f.DesignGrade), "a steeper flag must be steeper");
+});
+
 // ---------------------------------------------------------------------------------------------------- refusals
 
 Console.WriteLine("refusals and controls");
@@ -506,12 +574,12 @@ Test("reverse curve: two bends on opposite sides, and one range across both is r
   var sec = MakeSections(bl, Side.Left, Every(100, 188, 1), _ => 10, (_, _) => 0);
   True(SeamSolver.Solve(bl, sec, (_, _) => 0, 129, 159).Status == SeamStatus.Unsupported, "expected Unsupported");
 });
-Test("section change inside the bend is refused", () =>
+Test("section change inside the bend, refused only when asked (RefuseSectionChange)", () =>
 {
   var bl = AnglePoint(40, true);
   var sec = MakeSections(bl, Side.Left, Every(130, 190, 1), _ => 10, (_, _) => 6, hingeAt: s => s < 160 ? 3.0 : 3.3);
-  var r = SeamSolver.Solve(bl, sec, (_, _) => 6, 159, 161);
-  True(r.Status == SeamStatus.Unsupported && r.Reasons.Any(x => x.Contains("hinges")), $"status {r.Status}");
+  var r = SeamSolver.Solve(bl, sec, (_, _) => 6, 159, 161, new SolveOptions { RefuseSectionChange = true });
+  True(r.Status == SeamStatus.Unsupported && r.Reasons.Any(x => x.Contains("hinge")), $"status {r.Status}");
 });
 Test("clipped sections are refused as evidence", () =>
 {
@@ -525,6 +593,118 @@ Test("seam that never reaches the ground blocks", () =>
   var bl = AnglePoint(40, true);
   var sec = MakeSections(bl, Side.Left, Every(130, 190, 1), _ => 10, (_, _) => 6);
   True(SeamSolver.Solve(bl, sec, (_, _) => -50, 159, 161).Status == SeamStatus.NeverMeetsGround, "expected NeverMeetsGround");
+});
+
+// ---------------------------------------------------------------------------------------------------- benched parts
+
+// Whole-corridor snapshots of BTC Road with the benched parts (21 Sep 2026): the original UTNMBench (its sections meet the
+// ground and carry on with a terminal bench and drain, so they do not end on it) and UTNMBench v0.2 (every section ends
+// on the ground). Judged as the plugin runs them (level from the valley line) and by coverage, not by crossings alone.
+Console.WriteLine("benched parts (BTC Road snapshots, 21 Sep 2026)");
+(SeamResult R, (double Before, double Overlap, double Gap) Cov) Bench(string file, bool spread = false)
+{
+  var snap = Snapshot.Load(Path.Combine(AppContext.BaseDirectory, "fixtures", file));
+  var bl = snap.ToBaseline(); var sec = snap.ToSections();
+  var r = SeamSolver.Solve(bl, sec, snap.ToGround(), snap.BendFrom, snap.BendTo, new SolveOptions { LevelFromTarget = true, GroundCell = snap.Ground?.Cell ?? 0, AdjustFrom = spread ? AdjustFrom.FromHinge : AdjustFrom.LastLink, LevelRule = LevelRule.Mean });
+  var cov = Coverage(bl, sec, r, r.Side, 0.25);
+  Note($"{r.Status}{(spread ? " (spread from the hinge)" : "")}: crossings {r.LinkCrossingsBefore} -> {r.LinkCrossingsAfter}, twice {cov.Before:0.0} -> {cov.Overlap:0.00} m2, gap {cov.Gap:0.00} m2, largest level move {r.MaxLevelAdjust:0.00} m, slope change {r.MaxSlopeChange * 100:0.0}%, end {r.SeamEnd}, open ended {r.OpenEnded}");
+  return (r, cov);
+}
+foreach (var (file, what, open) in new[]
+{
+  ("btc-bench-orig-curve1.json", "original part, curve 1 (arc R15, cut, terminal bench and drain)", true),
+  ("btc-bench-orig-curve2.json", "original part, curve 2 (spiral-arc-spiral R12, fill)", true),
+  ("btc-bench-v02-curve1.json", "v0.2, curve 1", false),
+})
+  Test($"{what}: repaired, nothing covered twice, no gap; open-ended sections recognised = {open}", () =>
+  {
+    var (r, cov) = Bench(file);
+    True(r.Status == SeamStatus.Ok, $"status {r.Status}: {string.Join("; ", r.Reasons)}");
+    True(r.LinkCrossingsAfter == 0, $"{r.LinkCrossingsAfter} crossings remain");
+    Near(cov.Overlap, 0, 0.5, "area still covered twice"); Near(cov.Gap, 0, 0.5, "area left uncovered");
+    True(r.OpenEnded == open, $"open ended: {r.OpenEnded}");
+  });
+Test("v0.2, curve 2 (R12 fill, the valley ends in the toe-drain notch): the last link alone cannot take the move; spread from the hinge it is 3.5 %", () =>
+{
+  var (last, cl) = Bench("btc-bench-v02-curve2.json");
+  True(last.LinkCrossingsAfter == 0, $"{last.LinkCrossingsAfter} crossings remain");
+  Near(cl.Overlap, 0, 0.5, "area still covered twice"); Near(cl.Gap, 0, 0.5, "area left uncovered");
+  True(last.Status == SeamStatus.DesignConflict, "with only the last link taking the move this should be refused (a notch link moved 0.49 m)");
+  var (spread, cs) = Bench("btc-bench-v02-curve2.json", spread: true);
+  True(spread.Status == SeamStatus.Ok, $"spread: {spread.Status} {string.Join("; ", spread.Reasons)}");
+  True(spread.MaxSlopeChange < 0.05, $"slope change {spread.MaxSlopeChange:0.000}");
+  Near(cs.Overlap, 0, 0.5, "area still covered twice"); Near(cs.Gap, 0, 0.5, "area left uncovered");
+});
+
+// ---------------------------------------------------------------------------------------------------- section changes
+
+// A change of section in or next to a bend is the engineer's design (a drain size, a lane width, a region with another
+// assembly). It is solved as it stands, each side of the bend on its own sections, and reported for highlighting.
+Console.WriteLine("section changes");
+(double Before, double Overlap, double Gap) CoverageNote(SampledBaseline bl, SectionSet sec, SeamResult r, Side side)
+{
+  OverlapCells.Clear();
+  var cov = Coverage(bl, sec, r, side);
+  foreach (var c in OverlapCells.Take(12)) Note($"  overlap cell {c.X:0.0},{c.Y:0.0}: {c.Feet}");
+  Note("  seam: " + string.Join(" ", r.Seam.Select(q => $"{q.Kind}({q.StationA:0.0}/{q.OffsetA:0.00}|{q.StationB:0.0}/{q.OffsetB:0.00})")));
+  Note($"doubly covered before {cov.Before:0.0} m2, after {cov.Overlap:0.00} m2, uncovered after {cov.Gap:0.00} m2; changes: " +
+    string.Join("; ", r.SectionChanges.Select(c => $"{c.From:0.##}-{c.To:0.##}{(c.InBend ? " (in bend)" : "")} {c.What}")));
+  return cov;
+}
+Test("hinge moves at the PI (a wider drain after the angle point): solved, each side clipped on its own section, change reported", () =>
+{
+  var bl = AnglePoint(40, true);
+  var sec = MakeSections(bl, Side.Left, Every(130, 190, 0.5), s => 10 - 0.01 * (s - 130), (_, _) => 6, hingeAt: s => s < 160 - 1e-9 ? 3.0 : 3.3);
+  var r = SeamSolver.Solve(bl, sec, (_, _) => 6, 159, 161);
+  Healthy(r);
+  var (_, overlap, gap) = CoverageNote(bl, sec, r, Side.Left);
+  Near(overlap, 0, 0.5, "area still covered twice"); Near(gap, 0, 0.5, "area left uncovered");
+  True(r.SectionChanges.Count == 1 && r.SectionChanges[0].InBend, "the change at the PI must be reported as in the bend");
+  True(r.Warnings.Any(w => w.Contains("section changes")), "the change must be reported for highlighting");
+});
+Test("inside links start further out after the PI (drain edge 1.65 -> 1.8 m, as FL-02 at 384.17): solved and reported", () =>
+{
+  var bl = AnglePoint(9.8, true, 90);
+  var sec = MakeSections(bl, Side.Left, Every(130, 250, 0.5), s => 25 - 0.01 * (s - 130), (_, _) => 27.5,
+    hinge: 5.5, crossfall: 0.02, startAt: s => s < 190 - 1e-9 ? 1.65 : 1.8, hingeAt: s => s < 190 - 1e-9 ? 5.35 : 5.5);
+  var r = SeamSolver.Solve(bl, sec, (_, _) => 27.5, 189, 191);
+  Healthy(r);
+  var (_, overlap, gap) = CoverageNote(bl, sec, r, Side.Left);
+  Near(overlap, 0, 0.5, "area still covered twice"); Near(gap, 0, 0.5, "area left uncovered");
+  True(r.SectionChanges.Any(c => c.InBend && c.What.Contains("start")), "the start-offset change must be reported");
+});
+Test("section changes at the apex of a curve: solved and reported", () =>
+{
+  var bl = Scs(12, 8, 6.73, 40, true);
+  var sec = MakeSections(bl, Side.Left, Every(100, 202, 0.25), s => 14 - 0.01 * (s - 100), (_, _) => 0, hingeAt: s => s < 151.5 ? 3.0 : 3.4);
+  var r = SeamSolver.Solve(bl, sec, (_, _) => 0, 139, 164);
+  Healthy(r);
+  var (_, overlap, gap) = CoverageNote(bl, sec, r, Side.Left);
+  Near(overlap, 0, 0.5, "area still covered twice"); True(gap < 1.0, $"uncovered area {gap:0.0} m2");
+  True(r.SectionChanges.Any(c => c.InBend), "the change must be reported");
+});
+Test("region boundary inside the clip range (two sections at one station): the step is kept, not blended", () =>
+{
+  var bl = AnglePoint(40, true);
+  var profile = (Func<double, double>)(s => 10 - 0.01 * (s - 130));
+  var a = MakeSections(bl, Side.Left, Every(130, 154, 1), profile, (_, _) => 6, hinge: 3.0).Sections;
+  var b = MakeSections(bl, Side.Left, Every(154, 190, 1), profile, (_, _) => 6, hinge: 3.6).Sections;
+  var sec = new SectionSet(a.Concat(b));
+  True(sec.Sections.Count(x => Math.Abs(x.Station - 154) < 1e-9) == 2, "fixture: two sections at 154");
+  Near(sec.Hinge(153.5), 3.0, 1e-9, "hinge just before the boundary (region A)"); Near(sec.Hinge(154.5), 3.6, 1e-9, "hinge just after it (region B)");
+  var r = SeamSolver.Solve(bl, sec, (_, _) => 6, 159, 161);
+  Healthy(r);
+  var (_, overlap, gap) = CoverageNote(bl, sec, r, Side.Left);
+  Near(overlap, 0, 0.5, "area still covered twice"); Near(gap, 0, 0.5, "area left uncovered");
+  True(r.SectionChanges.Any(c => !c.InBend && Math.Abs(c.From - 154) < 1e-6), "the boundary change must be reported (outside the bend)");
+});
+Test("no section change: nothing reported, and the same clip as the undivided solver gave", () =>
+{
+  var bl = AnglePoint(47.6, true);
+  var sec = MakeSections(bl, Side.Left, Every(130, 190, 0.25), s => 10 - 0.01 * (s - 130), (_, _) => 6);
+  var r = SeamSolver.Solve(bl, sec, (_, _) => 6, 159, 161);
+  Healthy(r);
+  True(r.SectionChanges.Count == 0 && !r.Warnings.Any(w => w.Contains("section changes")), "nothing should be reported");
 });
 
 // ---------------------------------------------------------------------------------------------------- stability

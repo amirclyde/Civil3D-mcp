@@ -24,6 +24,15 @@ class Pt:
     Elevation = property(lambda s: s.Y)
 
 
+class Target:
+    """An offset or elevation target as the flowchart sees it: IsValid, Offset (offset target) / Elevation (elevation target)."""
+    def __init__(self, offset=NAN, elevation=NAN, valid=True):
+        self.Offset, self.Elevation, self.IsValid = offset, elevation, valid
+
+
+NO_TARGET = Target(valid=False)
+
+
 class Enum:
     def __init__(self, v): self.v = v
     def __eq__(self, o): return isinstance(o, Enum) and o.v == self.v
@@ -35,7 +44,7 @@ def to_python(expr):
     if e.startswith("[") and e.endswith("]"):
         e = e[1:-1]
     e = re.sub(r"\bIF\(|\bIf\(", "_if(", e)
-    e = e.replace("Math.Abs", "abs").replace("Math.Max", "max").replace("Math.Min", "min").replace("Math.Sign", "_sign")
+    e = e.replace("Math.Abs", "abs").replace("Math.Max", "max").replace("Math.Min", "min").replace("Math.Sign", "_sign").replace("Math.Floor", "_floor")
     e = re.sub(r"\bAndAlso\b", " and ", e); e = re.sub(r"\bOrElse\b", " or ", e); e = re.sub(r"\bNot\b", " not ", e)
     e = e.replace("<>", "!=")
     e = re.sub(r"(?<![<>=!])=(?!=)", "==", e)
@@ -60,7 +69,8 @@ class Part:
 
     def run(self, ground, params=None, limit=400.0):
         env = dict(self.defaults); env.update(params or {})
-        env.update(_if=lambda c, a, b: a if c else b, _sign=lambda v: (v > 0) - (v < 0), Yes=Enum(10), No=Enum(11), abs=abs, max=max, min=min)
+        env.update(_if=lambda c, a, b: a if c else b, _sign=lambda v: (v > 0) - (v < 0), _floor=lambda v: float(math.floor(v)) if math.isfinite(v) else v, Yes=Enum(10), No=Enum(11), abs=abs, max=max, min=min)
+        for k, v in list((params or {}).items()): env[k] = v
         pts, links, order = {}, [], []
 
         def ev(expr):

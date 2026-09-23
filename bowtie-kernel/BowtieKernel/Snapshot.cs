@@ -33,6 +33,11 @@ public sealed class Snapshot
     public bool Clipped { get; set; }
     /// <summary>[offset towards the inside, elevation relative to Z0], inner to outer, ending at the natural daylight.</summary>
     public List<double[]> Template { get; set; } = new();
+    /// <summary>Level of the last point minus the real daylight surface under it, as measured by the plugin on the surface
+    /// itself (the ground grid is only an approximation of it). Null when not measured.</summary>
+    public double? EndGap { get; set; }
+    /// <summary>Offset of the section's Hinge-coded point, when it has one.</summary>
+    public double? HingeAt { get; set; }
   }
   public sealed class GroundGridDto
   {
@@ -57,7 +62,7 @@ public sealed class Snapshot
   public SampledBaseline ToBaseline() => new(Samples.S, Samples.X, Samples.Y, Samples.Dir);
   public SectionSet ToSections(double extension = 5.0) => new(Sections.Select(s => new SectionSample
   {
-    Station = s.Station, Z0 = s.Z0, Clipped = s.Clipped, Template = s.Template.Select(p => (p[0], p[1])).ToList(),
+    Station = s.Station, Z0 = s.Z0, Clipped = s.Clipped, EndGap = s.EndGap, HingeAt = s.HingeAt, Template = s.Template.Select(p => (p[0], p[1])).ToList(),
   }), extension);
 
   /// <summary>Bilinear ground from the grid; null outside it or next to a hole.</summary>
@@ -91,12 +96,14 @@ public static class ResultReport
     cap = r.Cap.Select(q => new[] { Math.Round(q.X, 4), Math.Round(q.Y, 4) }),
     ground = r.Hit.HasValue ? new { x = Math.Round(r.Hit.Value.X, 4), y = Math.Round(r.Hit.Value.Y, 4), z = Math.Round(r.Hit.Value.Z, 4) } : null,
     meetStations = new[] { r.MeetA, r.MeetB }, meetOffsets = new[] { r.MeetOffsetA, r.MeetOffsetB },
-    seamEnd = r.SeamEnd, cutFillChanges = r.CutFillChanges.Select(x => Math.Round(x, 3)),
+    seamEnd = r.SeamEnd, openEnded = r.OpenEnded, cutFillChanges = r.CutFillChanges.Select(x => Math.Round(x, 3)),
+    slopeFlags = r.SlopeFlags.Select(f => new { station = Math.Round(f.Station, 3), kind = f.Kind, fromOffset = Math.Round(f.FromOffset, 3), toOffset = Math.Round(f.ToOffset, 3), designGrade = Math.Round(f.DesignGrade, 4), newGrade = Math.Round(f.NewGrade, 4) }),
+    sectionChanges = r.SectionChanges.Select(c => new { from = Math.Round(c.From, 3), to = Math.Round(c.To, 3), inBend = c.InBend, what = c.What }),
     clipFrom = r.ClipFrom, clipTo = r.ClipTo, capFrom = r.CapFrom, capTo = r.CapTo,
     checks = new
     {
       linkCrossingsBefore = r.LinkCrossingsBefore, linkCrossingsAfter = r.LinkCrossingsAfter,
-      maxClosure = Math.Round(r.MaxClosure, 4), apexMismatch = Math.Round(r.ApexMismatch, 4), apexSpread = Math.Round(r.ApexSpread, 4), levelStep = Math.Round(r.LevelStep, 4), maxLevelAdjust = Math.Round(r.MaxLevelAdjust, 4), endRunOut = Math.Round(r.EndRunOut, 4),
+      maxClosure = Math.Round(r.MaxClosure, 4), apexMismatch = Math.Round(r.ApexMismatch, 4), apexSpread = Math.Round(r.ApexSpread, 4), levelStep = Math.Round(r.LevelStep, 4), maxLevelAdjust = Math.Round(r.MaxLevelAdjust, 4), maxSlopeChange = Math.Round(r.MaxSlopeChange, 4), maxSpreadGrade = Math.Round(r.MaxSpreadGrade, 4), endRunOut = Math.Round(r.EndRunOut, 4),
       maxLean = Math.Round(r.MaxLean, 4), everySectionStopsAtItsFirstCrossing = r.Stations.All(x => x.FirstCrossingIsClip),
     },
     stations = r.Stations.Select(x => new
@@ -109,6 +116,7 @@ public static class ResultReport
       levelAdjust = x.LevelAdjust.HasValue ? Math.Round(x.LevelAdjust.Value, 3) : (double?)null,
       ownSlope = x.OwnSlope.HasValue ? Math.Round(x.OwnSlope.Value, 4) : (double?)null,
       adjustedSlope = x.AdjustedSlope.HasValue ? Math.Round(x.AdjustedSlope.Value, 4) : (double?)null,
+      spreadGrade = x.SpreadGrade.HasValue ? Math.Round(x.SpreadGrade.Value, 4) : (double?)null,
       crossings = x.Crossings.Select(c => Math.Round(c, 3)),
     }),
   };
