@@ -796,6 +796,33 @@ Test("refresh: polyline deviation - same shape with other vertices is 0; shift, 
   Near(Refresh.Deviation(bulge, a).Plan, 0.4, 1e-9, "symmetric");
 });
 
+Test("refresh: the level run-on past the valley's end is not compared; meet stations kept only in part still compare", () =>
+{
+  // valley 0,0 -> 6,0 rising, then a level run-on: 1.1 m on the old line, 30 m on the new (seen live, BT-577 FL-03)
+  List<P3> Valley(double runOn) => new() { new(0, 0, 10), new(3, 0, 11.5), new(6, 0, 13), new(6 + runOn, 0, 13) };
+  var old = Valley(1.1); var now = Valley(30);
+  True(Refresh.Deviation(old, now).Plan > 28, "the whole lines differ by the run-on");
+  var (p, l) = Refresh.Deviation(Refresh.WithoutRunOn(old, 1.1), Refresh.WithoutRunOn(now, 30));
+  Near(p, 0, 1e-9, "run-on cut by its recorded length, plan"); Near(l, 0, 1e-9, "level");
+  // no recorded length: the last segment, being level, is taken as the run-on on both
+  var (ph, lh) = Refresh.Deviation(Refresh.WithoutRunOn(old, null), Refresh.WithoutRunOn(now, null));
+  Near(ph, 0, 1e-9, "level last segment dropped on both"); Near(lh, 0, 1e-9, "level");
+  // a last segment that rises is valley, not run-on
+  var rising = new List<P3> { new(0, 0, 10), new(3, 0, 11.5), new(6, 0, 13) };
+  True(Refresh.WithoutRunOn(rising, null).Count == 3, "a rising last segment is kept");
+  // a run-on spanning two vertices, and a partial cut
+  var cut = Refresh.WithoutRunOn(new List<P3> { new(0, 0, 0), new(4, 0, 2), new(5, 0, 2), new(8, 0, 2) }, 3.5);
+  True(cut.Count == 3, $"cut back past a vertex, {cut.Count} points"); Near(cut[^1].X, 4.5, 1e-9, "ends 3.5 m back");
+  // the valley itself moved: still measured
+  var moved = new List<P3> { new(0, 0, 10), new(3, 0.4, 11.5), new(6, 0, 13), new(36, 0, 13) };
+  Near(Refresh.Deviation(Refresh.WithoutRunOn(old, 1.1), Refresh.WithoutRunOn(moved, 30)).Plan, 0.4, 1e-9, "a real move is kept");
+
+  Near(Refresh.StationShift(new[] { 309.0884, 310.1709 }, new[] { 309.0884, 310.1709 }), 0, 1e-12, "same stations");
+  Near(Refresh.StationShift(new[] { 310.1761 }, new[] { 309.0884, 310.1709 }), 0.0052, 1e-9, "old record kept only the added one");
+  Near(Refresh.StationShift(new[] { 309.0, 310.0 }, new[] { 309.3, 310.1 }), 0.3, 1e-9, "largest in order");
+  True(double.IsPositiveInfinity(Refresh.StationShift(Array.Empty<double>(), new[] { 1.0 })), "nothing to go by");
+});
+
 Test("refresh: section compare - same design agrees, other slope / lane width / reach are found", () =>
 {
   SectionSample S(double lane, double slope, double reach, double start = 1.05) => new SectionSample

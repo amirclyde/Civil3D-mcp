@@ -149,7 +149,11 @@ public static partial class CorridorBowtieCommands
           $"range={startStation.ToString("0.####", inv)}|{endStation.ToString("0.####", inv)}; step={step.ToString("0.####", inv)}; extension={extension.ToString("0.####", inv)}; " +
           $"capInset={capInset.ToString("0.####", inv)}; linkCode={linkCode}; surface={(surfaceUsed ?? "").Replace(";", ",")}; partner={partner.Replace(";", ",")}; " +
           $"stations={string.Join("|", addedList.Select(x => x.ToString("0.####", inv)))}; region={Clean(region?.Name)}; parent={Clean(fixParent)}; parentAssembly={Clean(fixAssembly)}; " +
-          $"before={Clean(fixBefore)}; after={Clean(fixAfter)}; pieces={(fixPieces ?? "").Replace(";", ",").Replace("=", "-")}";
+          $"before={Clean(fixBefore)}; after={Clean(fixAfter)}; pieces={(fixPieces ?? "").Replace(";", ",").Replace("=", "-")}; " +
+          // the meet stations as solved (not all may be added: one right next to an applied station is not) and the length of
+          // the level run-on past the valley's end - bowtie_refresh compares against both
+          $"meet={string.Join("|", new[] { result.MeetA, result.MeetB }.Where(x => x.HasValue).Select(x => x!.Value.ToString("0.####", inv)))}; " +
+          $"runOn={result.OvershootLength.ToString("0.####", inv)}";
         // levels: the seam's own level at each point; the apex point and the apex bar at the level the arc sections arrive at
         double firstZ = result.Seam.Select(q => q.Z).FirstOrDefault(z => !double.IsNaN(z));
         var apexZ = result.ApexZ ?? firstZ;

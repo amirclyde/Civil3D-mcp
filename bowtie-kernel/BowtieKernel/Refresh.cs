@@ -55,6 +55,49 @@ public static class Refresh
     }
   }
 
+  /// <summary>
+  /// The valley line without its level run-on past the valley's end (SeamResult.OvershootLength: it only gives the sections in
+  /// the region's margin something to find beyond their own daylight, and its length jumps between 0.1 m and 30 m with small
+  /// changes of the design). With 'runOn' known, that length is cut off the end. Without it (lines written before it was
+  /// recorded), the last segment is taken as the run-on when it is level; when the valley's end point lay on the run-on's
+  /// line it was simplified away, so that segment also holds the valley's last stretch - apply the same rule to both lines
+  /// compared, and the meet stations still show where the valley ends.
+  /// </summary>
+  public static List<P3> WithoutRunOn(IReadOnlyList<P3> line, double? runOn)
+  {
+    var pts = line.ToList();
+    if (pts.Count < 2) return pts;
+    if (runOn is not double over)
+    {
+      if (pts.Count >= 3 && Math.Abs(pts[^1].Z - pts[^2].Z) < 1e-4) pts.RemoveAt(pts.Count - 1);
+      return pts;
+    }
+    var left = over;
+    while (left > 1e-9 && pts.Count >= 2)
+    {
+      var a = pts[^2]; var b = pts[^1];
+      var len = Math.Sqrt((b.X - a.X) * (b.X - a.X) + (b.Y - a.Y) * (b.Y - a.Y));
+      if (len <= left + 1e-9) { pts.RemoveAt(pts.Count - 1); left -= len; continue; }
+      var t = (len - left) / len;
+      pts[^1] = new P3(a.X + (b.X - a.X) * t, a.Y + (b.Y - a.Y) * t, a.Z + (b.Z - a.Z) * t);
+      left = 0;
+    }
+    return pts;
+  }
+
+  /// <summary>
+  /// How far the meet stations moved. The same number of stations: the largest difference, in order. Otherwise (an old record
+  /// that kept only the stations that could be added to the corridor): each old station against the nearest new one, and
+  /// infinity when there is no old one to go by.
+  /// </summary>
+  public static double StationShift(IReadOnlyList<double> before, IReadOnlyList<double> after)
+  {
+    if (before.Count == 0 || after.Count == 0) return before.Count == after.Count ? 0 : double.PositiveInfinity;
+    var a = before.OrderBy(x => x).ToList(); var b = after.OrderBy(x => x).ToList();
+    if (a.Count == b.Count) return a.Zip(b, (x, y) => Math.Abs(x - y)).Max();
+    return a.Max(x => b.Min(y => Math.Abs(x - y)));
+  }
+
   /// <summary>Plan distance from p to the nearest point of the polyline, and the polyline's level there.</summary>
   public static (double Distance, double Z) Nearest(IReadOnlyList<P3> line, P3 p)
   {

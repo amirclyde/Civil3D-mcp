@@ -249,9 +249,23 @@ public static partial class CorridorBowtieCommands
         else
           warnings.Add($"'{region.Name}' has no record of where it came from, and the regions either side do not share one assembly ({prevAsm ?? "none"} / {nextAsm ?? "none"}): its assembly is kept and it is not merged.");
       }
+      // a recorded parent assembly that is on neither region next to the piece is a stale record (e.g. a repair cut from a
+      // region still on an older clip assembly): the assembly of the neighbours is given back instead, and said so
+      var pieceNames = pieces.Select(p => p.Region).Append(region.Name).ToList();
+      var reconciled = new List<string>();
+      UnfixPiece Reconciled(UnfixPiece p)
+      {
+        if (p.ParentAssembly == null) return p;
+        var (asm, note) = ReconcileParentAssembly(baseline, transaction, p.Region, p.ParentAssembly, pieceNames);
+        if (note != null) warnings.Add(note);
+        if (asm == null || string.Equals(asm, p.ParentAssembly, StringComparison.OrdinalIgnoreCase)) return p;
+        reconciled.Add($"{p.Region}: {p.ParentAssembly} -> {asm}");
+        return p with { ParentAssembly = asm };
+      }
+      ownPiece = Reconciled(ownPiece);
       var work = new List<UnfixPiece> { ownPiece };
       foreach (var other in pieces)
-        if (!string.Equals(other.Region, region.Name, StringComparison.OrdinalIgnoreCase) && IndexOfName(baseline, other.Region) >= 0) work.Add(other);
+        if (!string.Equals(other.Region, region.Name, StringComparison.OrdinalIgnoreCase) && IndexOfName(baseline, other.Region) >= 0) work.Add(Reconciled(other));
       foreach (var other in pieces)
         if (!string.Equals(other.Region, region.Name, StringComparison.OrdinalIgnoreCase) && IndexOfName(baseline, other.Region) < 0)
           warnings.Add($"The piece '{other.Region}' recorded for this repair is not on the baseline any more: it is left as it is.");
@@ -268,6 +282,7 @@ public static partial class CorridorBowtieCommands
         ["restoreName"] = merge ? ownPiece.Parent : null,
         ["restoreFrequency"] = ownPiece.Frequency,
         ["inferredFrom"] = inferredFrom,
+        ["parentAssemblyCorrected"] = reconciled.Count > 0 ? reconciled : null,
         ["pieces"] = work.Select(x => new Dictionary<string, object?>
         {
           ["region"] = x.Region, ["restoreAssembly"] = restoreAssembly ? x.ParentAssembly : null,
@@ -379,6 +394,48 @@ public static partial class CorridorBowtieCommands
   }
 
   private sealed record UnfixPiece(string Region, string? Parent, string? ParentAssembly, string? Before, string? After, string? Frequency);
+
+  /// <summary>Whether a region is a valley repair itself (a mapped ClipTarget).</summary>
+  private static bool IsClipRepair(BaselineRegion r)
+  {
+    try { var t = r.GetTargets(); for (var i = 0; i < t.Count; i++) if (t[i].LogicalName is "ClipTarget" && t[i].TargetIds.Count > 0) return true; } catch { }
+    return false;
+  }
+
+  /// <summary>
+  /// The stock assembly a repaired region stands in for, checked against the regions right next to it. A repair is cut out of
+  /// its parent, so the parent's assembly is on the pieces either side - unless the record is stale: a repair cut from a
+  /// region that was still on an older clip assembly records that clip as its parent, and a later design change can put a
+  /// new assembly on the neighbours. The neighbours that are neither pieces of the same repair nor repairs themselves decide:
+  /// when the recorded assembly is on one of them it stands; when it is on none and they all carry one assembly, that one is
+  /// taken and the reason given; when they differ, the record stands (with the reason). Returns the assembly and a note
+  /// (null when the record was confirmed).
+  /// </summary>
+  private static (string? Assembly, string? Note) ReconcileParentAssembly(Baseline baseline, Transaction transaction, string regionName, string? recorded,
+    ICollection<string> pieces)
+  {
+    var ri = IndexOfName(baseline, regionName);
+    if (ri < 0) return (recorded, null);
+    var all = baseline.BaselineRegions;
+    var near = new List<(string Region, string Assembly)>();
+    foreach (var i in new[] { ri - 1, ri + 1 })
+    {
+      if (i < 0 || i >= all.Count) continue;
+      var r = all[i];
+      if (pieces.Contains(r.Name, StringComparer.OrdinalIgnoreCase) || IsClipRepair(r)) continue;
+      var a = AssemblyName(transaction, SafeAssemblyId(r));
+      if (!string.IsNullOrWhiteSpace(a)) near.Add((r.Name, a!));
+    }
+    if (near.Count == 0) return (recorded, null);
+    if (!string.IsNullOrWhiteSpace(recorded) && near.Any(n => string.Equals(n.Assembly, recorded, StringComparison.OrdinalIgnoreCase))) return (recorded, null);
+    var kinds = near.Select(n => n.Assembly).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+    var where = string.Join(" and ", near.Select(n => $"'{n.Region}'"));
+    if (kinds.Count == 1)
+      return (kinds[0], string.IsNullOrWhiteSpace(recorded)
+        ? $"'{regionName}': no parent assembly recorded; taken from {where} next to it: {kinds[0]}."
+        : $"'{regionName}': the recorded parent assembly '{recorded}' is on neither region next to it (a stale record); taken from {where}: {kinds[0]}.");
+    return (recorded, $"'{regionName}': the recorded parent assembly '{recorded ?? "none"}' is on neither region next to it, and they differ ({string.Join(" / ", kinds)}): the record is kept.");
+  }
 
   private static string? Blank(string? s) => string.IsNullOrWhiteSpace(s) ? null : s.Trim();
 
