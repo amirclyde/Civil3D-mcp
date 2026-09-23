@@ -457,6 +457,8 @@ const CorridorBowtieFixArgsSchema = CorridorBowtieSeamArgsSchema.extend({
   keepOnFailure: z.boolean().optional(),
   assemblyMap: z.record(z.string()).optional(),
   frequency: z.number().positive().optional(),
+  redo: z.boolean().optional(),
+  background: z.boolean().optional(),
   parentRegion: z.string().optional(),
   parentAssembly: z.string().optional(),
   splitBefore: z.string().optional(),
@@ -677,6 +679,8 @@ const canonicalCorridorInputShape = {
   adjustFrom: z.enum(["auto", "hinge", "last_link"]).optional().describe("bowtie_seam / bowtie_fix: how the clip part takes a link to the valley level - hinge (spread over every slope and bench from the hinge: UTNM_LaneDaylightClip v0.4, Spread From Hinge = Yes), last_link (v0.3, or Spread From Hinge = No); auto (default) reads it from the clip assembly."),
   levelRule: z.enum(["no_steeper", "mean"]).optional().describe("bowtie_seam / bowtie_fix: the valley level where the two sides differ - no_steeper (default: a side in cut is only lowered, in fill only raised, so no slope comes out steeper than designed; the mean where no such level exists, flagged) or mean (halfway)."),
   clipAssembly: z.string().optional().describe("bowtie_seam: the clip assembly the region will get (for adjustFrom auto); bowtie_fix fills it from assemblyName."),
+  redo: z.boolean().optional().describe("bowtie_fix: repair again every bend already repaired with another clip assembly than assemblyName / assemblyMap asks for (undo, then fix; a repair that recorded nothing takes its parent from the regions either side). If the new repair does not go in, the previous one is made again (outcome kept_previous). Default false: repaired bends are skipped."),
+  background: z.boolean().optional().describe("bowtie_fix: return at once and run in the background (a whole corridor takes minutes); follow it with bowtie_fix_report. Only one bowtie_fix runs at a time."),
   keepOnFailure: z.boolean().optional().describe("bowtie_fix: leave a repair that fails part-way in the drawing for inspection (default false: every change made for that bend is rolled back with bowtie_unfix)."),
   assemblyMap: z.record(z.string()).optional().describe("bowtie_fix: clip assembly per parent assembly, e.g. {\"MD302 Drain 3.3\": \"MD302 Drain 3.3 LDC04\", \"MD303 Drain 3.6\": \"MD303 Drain 3.6 LDC04\"} - for a clash range that spans regions with different assemblies (each piece gets its own). Parent assemblies not listed fall back to assemblyName."),
   merge: z.boolean().optional().describe("bowtie_unfix: merge the region back with the pieces it was cut from (default true)."),
@@ -763,18 +767,33 @@ function bowtieRefreshParams(args: CorridorRawArgs, dryRun: boolean) {
 
 // bowtie_fix can run longer than a client waits (a remote bridge gives up after about a minute) while the server carries on
 // and finishes the repair: every report is kept here so bowtie_fix_report can hand it over afterwards.
-type FixReport = { at: string; durationMs: number; corridorName: string | null; startStation: number | null; endStation: number | null; ok: boolean; report: unknown; error: string | null };
+type FixReport = {
+  id: string; at: string; state: "running" | "done" | "failed"; durationMs: number | null;
+  corridorName: string | null; startStation: number | null; endStation: number | null;
+  progress: { total: number; done: number; current: string | null };
+  results: unknown[]; ok: boolean | null; report: unknown; error: string | null; started: number;
+};
 const recentFixReports: FixReport[] = [];
-function rememberFixReport(args: Record<string, unknown>, started: number, report: unknown, error: unknown) {
-  recentFixReports.push({
-    at: new Date().toISOString(), durationMs: Date.now() - started,
+let fixReportCounter = 0;
+function startFixReport(args: Record<string, unknown>): FixReport {
+  const entry: FixReport = {
+    id: `fix-${Date.now().toString(36)}-${++fixReportCounter}`, at: new Date().toISOString(), state: "running", durationMs: null,
     corridorName: typeof args.name === "string" ? args.name : null,
     startStation: typeof args.startStation === "number" ? args.startStation : null,
     endStation: typeof args.endStation === "number" ? args.endStation : null,
-    ok: error == null && (report as any)?.ok !== false, report: report ?? null,
-    error: error == null ? null : error instanceof Error ? error.message : String(error),
-  });
+    progress: { total: 0, done: 0, current: null }, results: [], ok: null, report: null, error: null, started: Date.now(),
+  };
+  recentFixReports.push(entry);
   while (recentFixReports.length > 20) recentFixReports.shift();
+  return entry;
+}
+function finishFixReport(entry: FixReport, report: unknown, error: unknown) {
+  entry.durationMs = Date.now() - entry.started;
+  entry.state = error == null ? "done" : "failed";
+  entry.ok = error == null && (report as any)?.ok !== false;
+  entry.report = report ?? null;
+  entry.progress.current = null;
+  entry.error = error == null ? null : error instanceof Error ? error.message : String(error);
 }
 
 export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
@@ -1386,7 +1405,11 @@ export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
       requiresActiveDrawing: true,
       safeForRetry: false,
       pluginMethods: ["bowtieBends", "bowtieSeam", "isolateCorridorRanges", "getCorridorTargetMappings", "setCorridorTargetMappings", "checkCorridorBowties", "bowtieUnfix"],
-      execute: async (args) => { const started = Date.now(); try { const fixReport = await withApplicationConnection(async (appClient) => {
+      execute: async (args) => {
+        const running = recentFixReports.find((r) => r.state === "running");
+        if (running) throw new Error(`A bowtie_fix is already running on '${running.corridorName}' (${running.progress.done}/${running.progress.total} bends, see bowtie_fix_report). Wait for it to finish; nothing was changed.`);
+        const entry = startFixReport(args);
+        const run = async () => { try { const fixReport = await withApplicationConnection(async (appClient) => {
         const call = async (method: string, params: Record<string, unknown>): Promise<{ ok: true; value: any } | { ok: false; error: string }> => {
           try { return { ok: true, value: await appClient.sendCommand(method, params) }; }
           catch (e) { return { ok: false, error: e instanceof Error ? e.message : String(e) }; }
@@ -1399,11 +1422,17 @@ export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
         });
         if (!bendsRes.ok) return { corridorName: args.name, ok: false, message: `The bends could not be read: ${bendsRes.error}. Nothing was changed.`, bends: [] };
         const bends = ((bendsRes.value?.bends ?? []) as any[]).filter((b) => !sideFilter || b.side === sideFilter);
+        entry.progress.total = bends.length;
 
-        const fixOne = async (bend: any) => {
+        type ClipChoice = { assemblyName: string | null; assemblyMap: Record<string, string> | null };
+        const requested: ClipChoice = {
+          assemblyName: typeof args.assemblyName === "string" && args.assemblyName.length > 0 ? args.assemblyName : null,
+          assemblyMap: (args.assemblyMap ?? null) as Record<string, string> | null,
+        };
+        const fixOne = async (bend: any, clip: ClipChoice = requested) => {
           const stages: Record<string, unknown> = {};
           const side = String(bend.side);
-          const bendArgs = { ...args, startStation: bend.startStation, endStation: bend.endStation, side, clipAssembly: args.clipAssembly ?? args.assemblyName ?? null };
+          const bendArgs = { ...args, assemblyName: clip.assemblyName ?? undefined, assemblyMap: clip.assemblyMap ?? undefined, startStation: bend.startStation, endStation: bend.endStation, side, clipAssembly: args.clipAssembly ?? clip.assemblyName ?? null };
           const out = (outcome: string, message: string, extra: Record<string, unknown> = {}) =>
             ({ startStation: bend.startStation, endStation: bend.endStation, side, type: bend.type, turnDegrees: bend.turnDegrees, outcome, message, ...extra, stages });
           if (bend.repaired) return out("skipped", `Region '${bend.region}' already carries a valley repair (mapped ClipTarget): refresh it with bowtie_refresh, or undo it with bowtie_unfix first.`);
@@ -1428,10 +1457,10 @@ export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
           const from = Math.floor(Math.min(meet[0], preview.result.clipFrom ?? meet[0]) - pad);
           const to = Math.ceil(Math.max(meet[1], preview.result.clipTo ?? meet[1]) + pad);
           const apexStation = Number(preview.result?.apex?.station ?? 0.5 * (from + to));
-          const assemblyMap = (args.assemblyMap ?? null) as Record<string, string> | null;
+          const assemblyMap = clip.assemblyMap;
 
           // 2. own region(s) for the clash range; a different assembly gets the parent's surface targets in the same transaction
-          const swapping = (typeof args.assemblyName === "string" && args.assemblyName.length > 0) || (assemblyMap !== null && Object.keys(assemblyMap).length > 0);
+          const swapping = clip.assemblyName !== null || (assemblyMap !== null && Object.keys(assemblyMap).length > 0);
           const alreadyIsolated = Math.abs(region.start - from) < 0.011 && Math.abs(region.end - to) < 0.011;
           type Piece = { name: string; start: number; end: number; parentRegion: string | null; parentAssembly: string | null; splitBefore: string | null; splitAfter: string | null; parentFrequency: string | null };
           let pieces: Piece[] = [{ name: region.name, start: region.start, end: region.end, parentRegion: null, parentAssembly: null, splitBefore: null, splitAfter: null, parentFrequency: null }];
@@ -1458,7 +1487,7 @@ export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
             const iso = await call("isolateCorridorRanges", {
               corridorName: args.name, baselineIndex,
               ranges: [{ startStation: from, endStation: to, name: args.regionName && bends.length === 1 ? args.regionName : `BT-${Math.round(apexStation)}${side === "left" ? "L" : "R"}` }],
-              namePrefix: "BT", frequency: Number(args.frequency ?? 1), assemblyName: typeof args.assemblyName === "string" && args.assemblyName.length > 0 ? args.assemblyName : null,
+              namePrefix: "BT", frequency: Number(args.frequency ?? 1), assemblyName: clip.assemblyName,
               assemblyMap, matchParent: true, carrySurfaceTargets: true, dryRun: false, rebuild: swapping,
             });
             if (!iso.ok) return out("failed", `The region could not be isolated: ${iso.error}. Nothing was changed.`, { failedAt: "isolate" });
@@ -1534,20 +1563,70 @@ export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
             { regions: regionNames, valleyLines: names, highlight: seam?.highlight ?? preview?.highlight ?? null, levelMove: seam?.result?.checks?.maxLevelAdjust ?? null, slopeChange: seam?.result?.checks?.maxSlopeChange ?? null });
         };
 
+        // redo: a bend repaired with another clip assembly than the one asked for is undone (its parent inferred from the
+        // regions either side when the old repair recorded none) and repaired again. If the new repair does not go in, the
+        // previous one is made again with its own assembly, so a redo never leaves a bend with its bowtie back unnoticed.
+        const targetClips = new Set<string>([...(requested.assemblyName ? [requested.assemblyName] : []), ...Object.values(requested.assemblyMap ?? {})].map((n) => n.toLowerCase()));
+        const handleBend = async (bend: any) => {
+          const base = { startStation: bend.startStation, endStation: bend.endStation, side: String(bend.side), type: bend.type, turnDegrees: bend.turnDegrees };
+          if (!bend.repaired) return await fixOne(bend);
+          const current = typeof bend.assemblyName === "string" && bend.assemblyName.length > 0 ? bend.assemblyName : null;
+          if (args.redo !== true)
+            return { ...base, outcome: "skipped", message: `Region '${bend.region}' already carries a valley repair${current ? ` (${current})` : ""}: pass redo to repair it again with the requested clip assembly, refresh it with bowtie_refresh, or undo it with bowtie_unfix.`, stages: {} };
+          if (targetClips.size === 0)
+            return { ...base, outcome: "skipped", message: `Region '${bend.region}' is already repaired; redo needs the clip assembly to repair it with (assemblyName or assemblyMap).`, stages: {} };
+          if (current && targetClips.has(current.toLowerCase()))
+            return { ...base, outcome: "skipped", message: `Region '${bend.region}' is already repaired with '${current}'.`, stages: {} };
+          const undo = await call("bowtieUnfix", { corridorName: args.name, baselineIndex, regionName: bend.region, merge: true, restoreAssembly: true, rebuild: true, dryRun: false, inferParent: true });
+          if (!undo.ok) return { ...base, outcome: "failed", message: `The previous repair of '${bend.region}' could not be undone: ${undo.error}. Nothing was changed.`, stages: {} };
+          const undone = { region: bend.region, previousAssembly: current, targetsCleared: undo.value?.targetsCleared, valleyLinesErased: undo.value?.valleyLinesErased, stationsDeleted: undo.value?.stationsDeleted, pieces: undo.value?.pieces, rebuildError: undo.value?.rebuildError, warnings: undo.value?.warnings };
+          const fresh: any = await fixOne({ ...bend, repaired: false });
+          fresh.stages = { undoPrevious: undone, ...(fresh.stages ?? {}) };
+          if (fresh.outcome === "repaired") {
+            const made = ((fresh.stages?.isolate as any)?.isolated ?? []) as any[];
+            const stale = made.map((m) => String(m.assemblyName ?? "")).filter((n) => n && !targetClips.has(n.toLowerCase()));
+            return { ...fresh, redone: true, previousAssembly: current,
+              message: `Previous repair (${current ?? "unknown assembly"}) replaced. ${fresh.message}${stale.length ? ` Still on ${stale.join(", ")}: its parent was not found, add it to assemblyMap.` : ""}` };
+          }
+          if (fresh.outcome === "skipped")
+            return { ...fresh, redone: true, previousAssembly: current, message: `Previous repair (${current ?? "unknown"}) removed; ${fresh.message}` };
+          if (current) {
+            const back: any = await fixOne({ ...bend, repaired: false }, { assemblyName: current, assemblyMap: null });
+            if (back.outcome === "repaired")
+              return { ...back, outcome: "kept_previous", previousAssembly: current, newAttempt: { outcome: fresh.outcome, message: fresh.message, stages: fresh.stages },
+                message: `Not repaired with the new clip (${fresh.outcome}: ${fresh.message}) - repaired again with the previous assembly '${current}'.` };
+            return { ...fresh, outcome: "failed", previousAssembly: current, previousAttempt: { outcome: back.outcome, message: back.message },
+              message: `Not repaired with the new clip (${fresh.message}), and the previous repair (${current}) could not be made again (${back.message}): this bend has its bowtie back. Repair it by hand.` };
+          }
+          return { ...fresh, outcome: "failed", message: `Previous repair removed and not repaired again: ${fresh.message}` };
+        };
+
         const results: any[] = [];
-        for (const bend of bends) results.push(await fixOne(bend));
+        for (const bend of bends) {
+          entry.progress.current = `${bend.side} bend ${bend.startStation}-${bend.endStation}${bend.region ? ` (${bend.region})` : ""}`;
+          const r = await handleBend(bend);
+          results.push(r); entry.results.push({ startStation: r.startStation, endStation: r.endStation, side: r.side, outcome: r.outcome, message: r.message, regions: (r as any).regions ?? null, highlight: (r as any).highlight ?? null });
+          entry.progress.done = results.length;
+        }
         const count = (o: string) => results.filter((r) => r.outcome === o).length;
-        const summary = { bends: results.length, repaired: count("repaired"), skipped: count("skipped"), refused: count("refused"), rolledBack: count("rolled_back"), failed: count("failed") };
+        const summary = { bends: results.length, repaired: count("repaired"), keptPrevious: count("kept_previous"), skipped: count("skipped"), refused: count("refused"), rolledBack: count("rolled_back"), failed: count("failed") };
         return {
           corridorName: args.name,
           ok: summary.failed === 0 && summary.rolledBack === 0,
           summary,
           message: bends.length === 0 ? "No bend in the range." :
-            `${summary.repaired} repaired, ${summary.skipped} skipped (no bowtie or already repaired), ${summary.refused} refused as they stand, ${summary.rolledBack} rolled back, ${summary.failed} failed.`,
+            `${summary.repaired} repaired, ${summary.keptPrevious} kept on their previous repair, ${summary.skipped} skipped (no bowtie or already repaired), ${summary.refused} refused as they stand, ${summary.rolledBack} rolled back, ${summary.failed} failed.`,
           highlight: results.filter((r) => r.highlight || (typeof r.slopeChange === "number" && r.slopeChange > 0.1)).map((r) => ({ startStation: r.startStation, endStation: r.endStation, side: r.side, sectionChanges: r.highlight, levelMove: r.levelMove, slopeChange: r.slopeChange })),
           bends: results,
         };
-      }); rememberFixReport(args, started, fixReport, null); return fixReport; } catch (e) { rememberFixReport(args, started, null, e); throw e; } },
+      }); finishFixReport(entry, fixReport, null); return fixReport; } catch (e) { finishFixReport(entry, null, e); throw e; } };
+        if (args.background === true) {
+          run().catch(() => { /* kept in the report */ });
+          return { corridorName: args.name, started: true, reportId: entry.id, background: true,
+            message: "The repair runs in the background: follow it with bowtie_fix_report (progress per bend, then the full report). Do not change this corridor until it is done." };
+        }
+        return await run();
+      },
     },
     bowtie_fix_report: {
       action: "bowtie_fix_report",
@@ -1558,8 +1637,10 @@ export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
       safeForRetry: true,
       execute: async (args) => {
         const name = typeof args.name === "string" && args.name.length > 0 ? args.name : null;
-        const reports = recentFixReports.filter((r) => !name || r.corridorName === name).slice().reverse();
-        return { reports, note: reports.length === 0 ? "No bowtie_fix has run in this server session." : "Newest first; kept in memory until the MCP server restarts." };
+        const reports = recentFixReports.filter((r) => !name || r.corridorName === name).slice().reverse()
+          .map(({ started: _started, ...r }) => (r.state === "running" ? { ...r, durationMs: Date.now() - Date.parse(r.at) } : r));
+        return { running: reports.some((r) => r.state === "running"), reports,
+          note: reports.length === 0 ? "No bowtie_fix has run in this server session." : "Newest first; a running fix shows its progress and the bends done so far. Kept in memory until the MCP server restarts." };
       },
     },
     bowtie_bends: {

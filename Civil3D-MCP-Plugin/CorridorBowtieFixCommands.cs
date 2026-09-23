@@ -132,6 +132,7 @@ public static partial class CorridorBowtieCommands
           ["type"] = isCorner ? "angle_point" : "curve",
           ["turnDegrees"] = Math.Round(Math.Abs(b.TurnDegrees), 3),
           ["region"] = region?.Name,
+          ["assemblyName"] = region != null ? AssemblyName(transaction, SafeAssemblyId(region)) : null,
           ["repaired"] = clipMapped,
         });
       }
@@ -165,6 +166,7 @@ public static partial class CorridorBowtieCommands
     var ctxBefore = PluginRuntime.GetOptionalString(parameters, "splitBefore");
     var ctxAfter = PluginRuntime.GetOptionalString(parameters, "splitAfter");
     var ctxFrequency = PluginRuntime.GetOptionalString(parameters, "parentFrequency");
+    var inferParent = PluginRuntime.GetOptionalBool(parameters, "inferParent") ?? true;
 
     Func<Autodesk.AutoCAD.ApplicationServices.Document, CivilDocument, Database, Transaction, object?> work = (doc, civilDoc, database, transaction) =>
     {
@@ -222,6 +224,31 @@ public static partial class CorridorBowtieCommands
         !string.IsNullOrWhiteSpace(ctxBefore) ? ctxBefore : own != null ? own.Before : Rec("before", null),
         !string.IsNullOrWhiteSpace(ctxAfter) ? ctxAfter : own != null ? own.After : Rec("after", null),
         !string.IsNullOrWhiteSpace(ctxFrequency) ? ctxFrequency : own?.Frequency ?? Rec("parentFrequency", null));
+      // A repair made before the fix context was recorded says nothing about where it came from. It was cut out of one
+      // region: when the regions either side carry the same assembly and are not repairs themselves, that is the parent
+      // (its assembly, name and frequency), and the three are merged back. Anything else is left split, with a warning.
+      string? inferredFrom = null;
+      if (inferParent && ownPiece.Parent == null && ownPiece.ParentAssembly == null && ownPiece.Before == null && ownPiece.After == null)
+      {
+        var at = IndexOfName(baseline, region.Name);
+        var all = baseline.BaselineRegions;
+        BaselineRegion? prev = at > 0 ? all[at - 1] : null, next = at >= 0 && at < all.Count - 1 ? all[at + 1] : null;
+        bool IsRepair(BaselineRegion r)
+        {
+          try { var t = r.GetTargets(); for (var i = 0; i < t.Count; i++) if (t[i].LogicalName is "ClipTarget" && t[i].TargetIds.Count > 0) return true; } catch { }
+          return false;
+        }
+        var prevAsm = prev != null ? AssemblyName(transaction, SafeAssemblyId(prev)) : null;
+        var nextAsm = next != null ? AssemblyName(transaction, SafeAssemblyId(next)) : null;
+        if (prev != null && next != null && prevAsm != null && string.Equals(prevAsm, nextAsm, StringComparison.OrdinalIgnoreCase) && !IsRepair(prev) && !IsRepair(next))
+        {
+          ownPiece = new UnfixPiece(region.Name, prev.Name, prevAsm, prev.Name, next.Name, FrequencySignature(prev));
+          inferredFrom = $"neighbours '{prev.Name}' and '{next.Name}' (both {prevAsm})";
+          warnings.Add($"'{region.Name}' has no record of where it came from (a repair made before bowtie_fix recorded it): its parent is taken from the regions either side, {inferredFrom}.");
+        }
+        else
+          warnings.Add($"'{region.Name}' has no record of where it came from, and the regions either side do not share one assembly ({prevAsm ?? "none"} / {nextAsm ?? "none"}): its assembly is kept and it is not merged.");
+      }
       var work = new List<UnfixPiece> { ownPiece };
       foreach (var other in pieces)
         if (!string.Equals(other.Region, region.Name, StringComparison.OrdinalIgnoreCase) && IndexOfName(baseline, other.Region) >= 0) work.Add(other);
@@ -240,6 +267,7 @@ public static partial class CorridorBowtieCommands
         ["mergeWith"] = merge ? new[] { ownPiece.Before, ownPiece.After }.Where(x => !string.IsNullOrEmpty(x)).ToList() : new List<string?>(),
         ["restoreName"] = merge ? ownPiece.Parent : null,
         ["restoreFrequency"] = ownPiece.Frequency,
+        ["inferredFrom"] = inferredFrom,
         ["pieces"] = work.Select(x => new Dictionary<string, object?>
         {
           ["region"] = x.Region, ["restoreAssembly"] = restoreAssembly ? x.ParentAssembly : null,
