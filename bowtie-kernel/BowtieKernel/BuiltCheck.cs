@@ -128,6 +128,30 @@ public static class BuiltCheck
     return new Coverage(0.5 * (to - from), on.Count >= 2, on.Count > 0 ? on.Min() : null, on.Count > 1 ? on.Max() : null, null, null, radius);
   }
 
+  /// <summary>
+  /// Where the section through 'end' crosses the valley lines, as an offset along it (the section runs from the baseline along
+  /// the inside normal of the tangent (tx, ty); 'end' lies on it at 'offset'). Null when it does not cross them within
+  /// 'offset' + 'tol'. A Valley end that is off the valley line but whose section crosses the line further in than the end is a
+  /// clip part that could not go further in: its lane already has no width, because the valley passes inside the drain there
+  /// (next to the bend point, where the two legs' drains meet). That is the drain's corner, not a clip in the wrong place.
+  /// </summary>
+  public static double? SectionCrossing(P3 end, double offset, double tx, double ty, Side side, IReadOnlyList<IReadOnlyList<P3>> lines, double tol)
+  {
+    var l = Math.Sqrt(tx * tx + ty * ty);
+    if (l < 1e-12 || offset <= 0) return null;
+    var n = side == Side.Left ? new P2(-ty / l, tx / l) : new P2(ty / l, -tx / l);
+    var origin = new P2(end.X - n.X * offset, end.Y - n.Y * offset);
+    // a section right at the bend point: the valley line starts at the bend point itself, where the ray starts
+    if (Nearest(lines, new P3(origin.X, origin.Y, 0)).Distance <= tol) return 0;
+    double? first = null;
+    foreach (var line in lines)
+    {
+      var hits = Geometry.RayPolyline(origin, n, offset + tol, line.Select(q => new P2(q.X, q.Y)).ToList());
+      if (hits.Count > 0 && (first == null || hits[0] < first)) first = hits[0];
+    }
+    return first;
+  }
+
   /// <summary>Proper plan crossings (more than 'tol' from every end) of a segment with a polyline; the parameters along the segment.</summary>
   public static List<double> SegmentPolyline(P3 a, P3 b, IReadOnlyList<P3> line, double tol)
   {

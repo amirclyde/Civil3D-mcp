@@ -1978,7 +1978,7 @@ public static partial class CorridorBowtieCommands
     var codePts = sides.ToDictionary(sd => sd, _ => new List<(double S, double X, double Y, double Tx, double Ty)>());
     var valleyCount = sides.ToDictionary(sd => sd, _ => 0);
     // per side and station: has the code point, has a Valley point (the outermost, with its offset)
-    var ends = sides.ToDictionary(sd => sd, _ => new List<(double S, bool Code, K.P3? Valley, double ValleyOffset)>());
+    var ends = sides.ToDictionary(sd => sd, _ => new List<(double S, bool Code, K.P3? Valley, double ValleyOffset, double Tx, double Ty)>());
     var unreadableAt = new List<double>();
 
     foreach (var s in stations)
@@ -2019,7 +2019,7 @@ public static partial class CorridorBowtieCommands
           if (HasCode(p.CorridorCodes, code) && o > bestOff) { best = p; bestOff = o; }
         }
         if (best != null) codePts[sd].Add((s, best.XYZ.X, best.XYZ.Y, tx, ty));
-        ends[sd].Add((s, best != null, valley != null ? new K.P3(valley.XYZ.X, valley.XYZ.Y, valley.XYZ.Z) : null, valleyOff));
+        ends[sd].Add((s, best != null, valley != null ? new K.P3(valley.XYZ.X, valley.XYZ.Y, valley.XYZ.Z) : null, valleyOff, tx, ty));
       }
     }
     result.Unreadable = unreadableAt.Count;
@@ -2153,11 +2153,22 @@ public static partial class CorridorBowtieCommands
 
         // each Valley end on the valley line
         var offPlan = new List<Dictionary<string, object?>>(); var offLevel = new List<Dictionary<string, object?>>();
+        var clamped = new List<Dictionary<string, object?>>();
         double worstPlan = 0, worstLevel = 0;
+        var kside = sd == "left" ? K.Side.Left : K.Side.Right;
+        // the innermost a Valley end can be: where the clip part starts (the drain's outer edge)
+        var innermost = onValley.Count > 0 ? onValley.Min(e => e.ValleyOffset) : 0.0;
         foreach (var e in onValley)
         {
           var (d, z) = K.BuiltCheck.Nearest(lines, e.Valley!.Value);
           var dz = double.IsNaN(z) ? 0 : Math.Abs(e.Valley.Value.Z - z);
+          // off the line, but the valley crosses this section further in: the clip part's lane has no width left (the valley
+          // passes inside the drain, at the drains' corner by the bend point) - the section cannot end any closer
+          if (d > valleyTolerance && e.ValleyOffset <= innermost + valleyTolerance && K.BuiltCheck.SectionCrossing(e.Valley.Value, e.ValleyOffset, e.Tx, e.Ty, kside, lines, valleyTolerance) is double inner && inner <= e.ValleyOffset + valleyTolerance)
+          {
+            clamped.Add(new Dictionary<string, object?> { ["station"] = e.S, ["offset"] = Math.Round(e.ValleyOffset, 3), ["valleyCrossesAt"] = Math.Round(inner, 3), ["planDistance"] = Math.Round(d, 4) });
+            continue;
+          }
           worstPlan = Math.Max(worstPlan, d); worstLevel = Math.Max(worstLevel, dz);
           if (d > valleyTolerance) offPlan.Add(new Dictionary<string, object?> { ["station"] = e.S, ["offset"] = Math.Round(e.ValleyOffset, 3), ["planDistance"] = Math.Round(d, 4) });
           else if (dz > valleyTolerance) offLevel.Add(new Dictionary<string, object?> { ["station"] = e.S, ["offset"] = Math.Round(e.ValleyOffset, 3), ["levelDifference"] = Math.Round(e.Valley.Value.Z - z, 4) });
@@ -2166,6 +2177,8 @@ public static partial class CorridorBowtieCommands
         {
           ["worstPlanDistance"] = Math.Round(worstPlan, 4), ["worstLevelDifference"] = Math.Round(worstLevel, 4),
           ["offLine"] = offPlan.Take(maxListed).ToList(), ["offLevel"] = offLevel.Take(maxListed).ToList(),
+          // sections whose lane is used up at the drain edge because the valley passes inside the drain there (by the bend point)
+          ["atDrainEdge"] = clamped.Take(maxListed).ToList(),
         };
         if (offPlan.Count > 0) problems.Add($"{offPlan.Count} section(s) end in Valley but off the valley line (up to {offPlan.Max(x => (double)x["planDistance"]!):0.###} m)");
         if (offLevel.Count > 0)
@@ -2199,8 +2212,10 @@ public static partial class CorridorBowtieCommands
         // continuity: how closely the built surface follows the valley between the points where sections end on it. Both legs'
         // ends lie along the one line; the surface between neighbouring ends is a straight chord that cuts across wherever the
         // valley bends in between. Not a fault of the repair but of the station spacing: reported, and a note when it is coarse.
-        var ordered = K.BuiltCheck.OrderAlong(onValley.Select(e => e.Valley!.Value).ToList(), lines);
-        var chain = ordered.Select(k => (onValley[k].S, onValley[k].Valley!.Value)).ToList();
+        var clampedAt = new HashSet<double>(clamped.Select(c => (double)c["station"]!));
+        var onLine = onValley.Where(e => !clampedAt.Contains(e.S)).ToList();
+        var ordered = K.BuiltCheck.OrderAlong(onLine.Select(e => e.Valley!.Value).ToList(), lines);
+        var chain = ordered.Select(k => (onLine[k].S, onLine[k].Valley!.Value)).ToList();
         var gap = K.BuiltCheck.ChainDeviation(chain, lines);
         row["join"] = new Dictionary<string, object?>
         {

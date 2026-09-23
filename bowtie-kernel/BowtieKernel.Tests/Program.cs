@@ -860,6 +860,17 @@ Test("check: feature-line runs break at stations without the code; the join alon
   True(!BuiltCheck.CurveCoverage(100, 110, 25, 0.5, new double[] { 95, 105, 115 }).Covered, "one station on the arc is not enough");
   True(BuiltCheck.CurveCoverage(100, 110, 25, 0.5, new double[] { 101, 109 }).Covered, "two stations on the arc");
 
+  // clamped at the drain edge: the section (tangent +x, inside = left = +y) from (5,0) ends at offset 1.05 (5, 1.05); the valley
+  // line crosses x = 5 at y = 0.9, further in than the end -> the lane could not go further; a line crossing further out is not
+  IReadOnlyList<P3> corner = new List<P3> { new(4, 0.5, 0), new(6, 1.3, 0) };
+  var at = BuiltCheck.SectionCrossing(new P3(5, 1.05, 0), 1.05, 1, 0, Side.Left, new List<IReadOnlyList<P3>> { corner }, 0.01);
+  True(at.HasValue && Math.Abs(at.Value - 0.9) < 1e-9, $"crossing further in: {at}");
+  IReadOnlyList<P3> outer = new List<P3> { new(4, 1.5, 0), new(6, 2.5, 0) };
+  True(BuiltCheck.SectionCrossing(new P3(5, 1.05, 0), 1.05, 1, 0, Side.Left, new List<IReadOnlyList<P3>> { outer }, 0.01) == null, "line further out: not clamped");
+  var atPi = BuiltCheck.SectionCrossing(new P3(4, 1.05, 0), 1.05, 1, 0, Side.Left, new List<IReadOnlyList<P3>> { new List<P3> { new(4, 0, 0), new(6, 1.3, 0) } }, 0.01);
+  True(atPi == 0, $"section through the bend point, where the valley line starts: {atPi}");
+  True(BuiltCheck.SectionCrossing(new P3(5, -1.05, 0), 1.05, 1, 0, Side.Right, new List<IReadOnlyList<P3>> { new List<P3> { new(4, -0.5, 0), new(6, -1.3, 0) } }, 0.01) is double r && Math.Abs(r - 0.9) < 1e-9, "right side");
+
   // a link crossing a valley line, one ending on it, one touching a vertex between its segments
   IReadOnlyList<P3> v = new List<P3> { new(0, 0, 0), new(0, 5, 0), new(0, 10, 0) };
   True(BuiltCheck.SegmentPolyline(new P3(-1, 2, 0), new P3(1, 2, 0), v, 0.005).Count == 1, "crosses");
