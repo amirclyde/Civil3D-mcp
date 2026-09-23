@@ -69,6 +69,8 @@ public static partial class CorridorBowtieCommands
     public ObjectId? NewSeamId, NewCapId;
     public List<(double Station, string Region)> DeletedStations = new();
     public List<(double Station, string Region)> AddedStations = new();
+    public bool StationsOut, OldRenamed;
+    public List<Dictionary<string, object?>> AssemblyChecks = new();
     public Dictionary<string, object?>? CheckBefore, CheckAfter;
   }
 
@@ -80,6 +82,7 @@ public static partial class CorridorBowtieCommands
     var dryRun = PluginRuntime.GetOptionalBool(parameters, "dryRun") ?? false;
     var tolerance = PluginRuntime.GetOptionalDouble(parameters, "tolerance") ?? 0.01;
     var driftTolerance = PluginRuntime.GetOptionalDouble(parameters, "driftTolerance") ?? 0.01;
+    var gradeTolerance = PluginRuntime.GetOptionalDouble(parameters, "gradeTolerance") ?? 0.002;
     var checkTolerance = PluginRuntime.GetOptionalDouble(parameters, "checkTolerance") ?? 0.005;
     var searchMargin = PluginRuntime.GetOptionalDouble(parameters, "searchMargin") ?? 60.0;
     var maxLevelAdjust = PluginRuntime.GetOptionalDouble(parameters, "maxLevelAdjust") ?? 0.30;
@@ -137,8 +140,73 @@ public static partial class CorridorBowtieCommands
       // ---------------------------------------------------------------- 1. the state before
       foreach (var g in groups) g.CheckBefore = Check(g);
 
-      // ---------------------------------------------------------------- 2. unmap, rebuild: unclipped sections
+      // Civil 3D does not restore every subassembly target when a transaction is aborted (seen live: a region's clip
+      // mapping on its second subassembly stayed empty after a rollback, and the drawing did not even show as changed). So
+      // nothing here relies on a rollback: a dry run, and any failure part-way, put every change back by hand - valley
+      // lines, meet stations, target mappings - rebuild, check that the mappings are as they were, and commit.
       var allMappings = groups.SelectMany(g => g.Mappings).ToList();
+      void RevertGroup(SeamGroup g)
+      {
+        foreach (var (st, _) in g.AddedStations)
+        {
+          var holder = RegionHoldingStation(baseline, st);
+          if (holder != null) try { holder.Value.Region.DeleteStation(holder.Value.Station); } catch (Exception ex) { g.Warnings.Add($"New meet station {st:0.###} could not be removed: {ex.Message}"); }
+        }
+        g.AddedStations.Clear();
+        PutBackStations(baseline, g);
+        foreach (var id in new[] { g.NewSeamId, g.NewCapId }.Where(x => x.HasValue))
+          try { transaction.GetObject(id!.Value, OpenMode.ForWrite).Erase(); } catch (Exception ex) { g.Warnings.Add($"The new valley line could not be erased: {ex.Message}"); }
+        g.NewSeamId = null; g.NewCapId = null;
+        if (g.OldRenamed)
+        {
+          try
+          {
+            CivilObjectUtils.GetRequiredObject<FeatureLine>(transaction, g.SeamId, OpenMode.ForWrite).Name = g.SeamName;
+            if (g.CapId.HasValue) CivilObjectUtils.GetRequiredObject<FeatureLine>(transaction, g.CapId.Value, OpenMode.ForWrite).Name = g.CapName!;
+            g.OldRenamed = false;
+          }
+          catch (Exception ex) { g.Warnings.Add($"The old valley line could not be given its name back: {ex.Message}"); }
+        }
+        g.Update = false;
+      }
+      List<string> MappingsDiffer()
+      {
+        var diff = new List<string>();
+        foreach (var byRegion in allMappings.GroupBy(m => m.Region, StringComparer.OrdinalIgnoreCase))
+        {
+          var ri = IndexOfName(baseline, byRegion.Key);
+          if (ri < 0) { diff.Add($"region '{byRegion.Key}' is gone"); continue; }
+          SubassemblyTargetInfoCollection infos;
+          try { infos = baseline.BaselineRegions[ri].GetTargets(); } catch (Exception ex) { diff.Add($"'{byRegion.Key}': targets not readable ({ex.Message})"); continue; }
+          foreach (var m in byRegion)
+          {
+            var now = Enumerable.Range(0, infos.Count).Select(i => infos[i])
+              .FirstOrDefault(t => string.Equals(t.SubassemblyName, m.Subassembly, StringComparison.OrdinalIgnoreCase) && t.LogicalName == m.Logical);
+            var ids = now == null ? new List<ObjectId>() : now.TargetIds.Cast<ObjectId>().ToList();
+            if (!ids.OrderBy(x => x.Handle.Value).SequenceEqual(m.Ids.OrderBy(x => x.Handle.Value))) diff.Add($"'{m.Region}' {m.Subassembly}:{m.Logical}");
+          }
+        }
+        return diff;
+      }
+      Dictionary<string, object?> RestoreAll()
+      {
+        foreach (var g in groups) RevertGroup(g);
+        var restoreErrors = new List<string>();
+        try { SetMappings(baseline, allMappings, m => m.Ids.ToList()); } catch (Exception ex) { restoreErrors.Add($"mappings: {ex.Message}"); }
+        var rb = TryRebuild(corridor);
+        if (rb != null) restoreErrors.Add($"rebuild: {rb}");
+        var differ = MappingsDiffer();
+        return new Dictionary<string, object?>
+        {
+          ["restored"] = restoreErrors.Count == 0 && differ.Count == 0,
+          ["mappingsNotAsBefore"] = differ.Count > 0 ? differ : null,
+          ["errors"] = restoreErrors.Count > 0 ? restoreErrors : null,
+        };
+      }
+
+      try
+      {
+      // ---------------------------------------------------------------- 2. unmap, rebuild: unclipped sections
       SetMappings(baseline, allMappings, m => new List<ObjectId>());
       // the meet stations a repair added are sections placed by its own solve: solved again with them the answer shifts a
       // little each time. They come out for the solve, as they were not there when the repair was made, and go back in
@@ -150,7 +218,7 @@ public static partial class CorridorBowtieCommands
         {
           var holder = RegionHoldingStation(baseline, st);
           if (holder == null) { g.Warnings.Add($"The recorded meet station {st:0.###} is no longer an added station."); continue; }
-          try { holder.Value.Region.DeleteStation(holder.Value.Station); g.DeletedStations.Add((holder.Value.Station, holder.Value.Region.Name)); }
+          try { holder.Value.Region.DeleteStation(holder.Value.Station); g.DeletedStations.Add((holder.Value.Station, holder.Value.Region.Name)); g.StationsOut = true; }
           catch (Exception ex) { g.Warnings.Add($"Meet station {st:0.###} could not be taken out for the solve: {ex.Message}"); }
         }
       }
@@ -161,12 +229,12 @@ public static partial class CorridorBowtieCommands
       // ---------------------------------------------------------------- 3. per repair: assembly drift, solve, compare
       foreach (var g in groups)
       {
-        g.Drift = AssemblyDrift(baseline, transaction, g, driftTolerance);
+        (g.Drift, g.AssemblyChecks) = AssemblyDrift(baseline, transaction, g, Stations(), gradeTolerance, driftTolerance);
         if (g.Drift.Count > 0 && !ignoreAssemblyDrift)
         {
           g.Outcome = "refused_stale_assembly";
           g.Message = $"The clip assembly of {string.Join(" / ", g.Pieces.Select(p => $"'{p}'"))} no longer matches the stock assembly next to it " +
-                      $"({string.Join("; ", g.Drift.Take(3).Select(d => $"{d["side"]} side at {d["station"]}: level differs by {d["maxLevel"]} m at {d["atOffset"]} m, reach by {d["reachDiff"]} m"))}). " +
+                      $"({string.Join("; ", g.Drift.Take(3).Select(d => $"{d["side"]} side, {d["clipAssembly"]} at {d["clipStation"]} against {d["stockAssembly"]} at {d["stockStation"]}: {d["what"]}"))}). " +
                       "Make the same design change in the clip assembly (it is a copy, not a reference), then refresh again. The old valley line is kept.";
           continue;
         }
@@ -264,6 +332,7 @@ public static partial class CorridorBowtieCommands
         var oldSeam = CivilObjectUtils.GetRequiredObject<FeatureLine>(transaction, g.SeamId, OpenMode.ForWrite);
         var layer = oldSeam.LayerId;
         oldSeam.Name = UniqueFeatureLineName(civilDoc, database, transaction, $"{g.SeamName} (before refresh)");
+        g.OldRenamed = true;
         var capName = g.CapName ?? (g.NewCap.Count >= 2 ? g.SeamName.Replace(" Valley ", " Apex ") : null);
         if (g.CapId.HasValue)
         {
@@ -319,18 +388,7 @@ public static partial class CorridorBowtieCommands
       {
         foreach (var g in failing)
         {
-          foreach (var (st, reg) in g.AddedStations)
-          {
-            var holder = RegionHoldingStation(baseline, st);
-            if (holder != null) try { holder.Value.Region.DeleteStation(holder.Value.Station); } catch { }
-          }
-          g.AddedStations.Clear();
-          PutBackStations(baseline, g);
-          foreach (var id in new[] { g.NewSeamId, g.NewCapId }.Where(x => x.HasValue))
-            try { transaction.GetObject(id!.Value, OpenMode.ForWrite).Erase(); } catch { }
-          CivilObjectUtils.GetRequiredObject<FeatureLine>(transaction, g.SeamId, OpenMode.ForWrite).Name = g.SeamName;
-          if (g.CapId.HasValue) CivilObjectUtils.GetRequiredObject<FeatureLine>(transaction, g.CapId.Value, OpenMode.ForWrite).Name = g.CapName!;
-          g.Update = false; g.NewSeamId = null; g.NewCapId = null;
+          RevertGroup(g);
           g.Outcome = "reverted";
           g.Message = $"The refreshed valley still left {g.CheckAfter?["linkCrossings"]} link crossing(s) / {g.CheckAfter?["loops"]} loop(s) in the built corridor, so the repair was put back as it was. Look at it in section, or repair it again with bowtie_fix (redo + force).";
         }
@@ -342,12 +400,28 @@ public static partial class CorridorBowtieCommands
       }
 
       // ---------------------------------------------------------------- 7. the old lines of the refreshed repairs go
+      //                                                                     (a dry run instead puts everything back)
       foreach (var g in groups.Where(x => x.Update))
       {
+        var moved = $"Valley moved by up to {g.Plan:0.###} m in plan and {g.Level:0.###} m in level{(g.StationShift is double sh && !double.IsInfinity(sh) ? $", meet stations by {sh:0.###} m" : "")}";
+        if (dryRun)
+        {
+          g.Outcome = "would_refresh";
+          g.Message = $"{moved}: a real run replaces it and maps it again; the built corridor was clean with it.";
+          continue;
+        }
         foreach (var id in new[] { (ObjectId?)g.SeamId, g.CapId }.Where(x => x.HasValue))
           try { transaction.GetObject(id!.Value, OpenMode.ForWrite).Erase(); } catch (Exception ex) { g.Warnings.Add($"The old valley line could not be erased: {ex.Message}"); }
+        g.OldRenamed = false;
         g.Outcome = "refreshed";
-        g.Message = $"Valley moved by up to {g.Plan:0.###} m in plan and {g.Level:0.###} m in level{(g.StationShift is double sh && !double.IsInfinity(sh) ? $", meet stations by {sh:0.###} m" : "")}: replaced, mapped again, the built corridor is clean.";
+        g.Message = $"{moved}: replaced, mapped again, the built corridor is clean.";
+      }
+      Dictionary<string, object?>? restore = null;
+      if (dryRun) restore = RestoreAll();
+      else
+      {
+        var differ = MappingsDiffer().Where(d => !groups.Any(g => g.Outcome == "refreshed" && g.Pieces.Any(p => d.Contains($"'{p}'")))).ToList();
+        if (differ.Count > 0) warnings.Add($"Target mappings not as they were on repairs that were not refreshed: {string.Join(", ", differ)}.");
       }
 
       var rows = groups.Select(g => new Dictionary<string, object?>
@@ -361,7 +435,8 @@ public static partial class CorridorBowtieCommands
         ["moved"] = g.Plan.HasValue ? new Dictionary<string, object?> { ["plan"] = Round(g.Plan), ["level"] = Round(g.Level), ["meetStations"] = Round(g.StationShift) } : null,
         ["meetStations"] = new Dictionary<string, object?> { ["before"] = g.OldStations.Select(x => Math.Round(x, 4)).ToList(), ["after"] = g.Outcome == "refreshed" ? g.AddedStations.Select(x => Math.Round(x.Station, 4)).ToList() : null },
         ["assemblyDrift"] = g.Drift.Count > 0 ? g.Drift : null,
-        ["highlight"] = g.Result != null && g.Outcome is "refreshed" or "unchanged" ? Highlight(g.Result) : null,
+        ["assemblyChecks"] = g.AssemblyChecks,
+        ["highlight"] = g.Result != null && g.Outcome is "refreshed" or "would_refresh" or "unchanged" ? Highlight(g.Result) : null,
         ["checks"] = g.Result == null ? null : new Dictionary<string, object?>
         {
           ["status"] = g.Result.Status.ToString(), ["linkCrossingsBefore"] = g.Result.LinkCrossingsBefore, ["linkCrossingsAfter"] = g.Result.LinkCrossingsAfter,
@@ -375,7 +450,7 @@ public static partial class CorridorBowtieCommands
       int Count(string o) => groups.Count(g => g.Outcome == o);
       var summary = new Dictionary<string, object?>
       {
-        ["repairs"] = groups.Count, ["refreshed"] = Count("refreshed"), ["unchanged"] = Count("unchanged"), ["notNeeded"] = Count("not_needed"),
+        ["repairs"] = groups.Count, ["refreshed"] = Count("refreshed"), ["wouldRefresh"] = Count("would_refresh"), ["unchanged"] = Count("unchanged"), ["notNeeded"] = Count("not_needed"),
         ["refused"] = Count("refused"), ["staleAssembly"] = Count("refused_stale_assembly"), ["reverted"] = Count("reverted"),
         ["cleanAfter"] = groups.Count(g => g.CheckAfter?["clean"] is true),
       };
@@ -384,17 +459,41 @@ public static partial class CorridorBowtieCommands
         ["corridorName"] = corridor.Name,
         ["baselineIndex"] = baselineIndex,
         ["dryRun"] = dryRun,
+        ["restore"] = restore,
         ["summary"] = summary,
-        ["message"] = (dryRun ? "Dry run (everything done and rolled back, the drawing is unchanged): " : "") +
-          $"{summary["refreshed"]} refreshed, {summary["unchanged"]} unchanged, {summary["notNeeded"]} no longer needed, {summary["refused"]} refused, " +
+        ["message"] = (dryRun ? (restore?["restored"] is true
+            ? "Dry run (everything done, then put back by hand and checked - the corridor is as it was; Civil 3D shows the drawing as changed): "
+            : "DRY RUN COULD NOT PUT EVERYTHING BACK - see restore; do not save before checking: ") : "") +
+          $"{summary["refreshed"]} refreshed, {summary["wouldRefresh"]} would be refreshed, {summary["unchanged"]} unchanged, {summary["notNeeded"]} no longer needed, {summary["refused"]} refused, " +
           $"{summary["staleAssembly"]} with a stale clip assembly, {summary["reverted"]} put back; {summary["cleanAfter"]} of {groups.Count} clean in the built corridor.",
         ["repairs"] = rows,
         ["legacyValleys"] = legacy.Count > 0 ? legacy : null,
         ["otherClipTargets"] = foreign.Count > 0 ? foreign : null,
         ["warnings"] = warnings,
       };
+      }
+      catch (Exception ex)
+      {
+        // put everything back by hand and commit that (see above: a rollback would not restore every target)
+        var restoredAfterError = RestoreAll();
+        return new Dictionary<string, object?>
+        {
+          ["corridorName"] = corridor.Name,
+          ["baselineIndex"] = baselineIndex,
+          ["dryRun"] = dryRun,
+          ["failed"] = true,
+          ["error"] = ex.Message,
+          ["restore"] = restoredAfterError,
+          ["message"] = restoredAfterError["restored"] is true
+            ? $"The refresh stopped ({ex.Message}). Every change was put back by hand and checked: the corridor is as it was."
+            : $"The refresh stopped ({ex.Message}) and NOT everything could be put back (see restore): check the repairs with bowtie_bends / bowtie_check before saving.",
+          ["repairs"] = groups.Select(g => new Dictionary<string, object?> { ["regions"] = g.Pieces, ["valleyLine"] = g.SeamName, ["outcome"] = g.Outcome, ["message"] = g.Message, ["warnings"] = g.Warnings }).ToList(),
+          ["warnings"] = warnings,
+        };
+      }
     };
-    return dryRun ? CivilExecution.ReadAsync<object?>(work) : CivilExecution.WriteAsync<object?>(work);
+    // always a committed transaction: changes are put back by hand where needed (never left to a rollback)
+    return CivilExecution.WriteAsync<object?>(work);
   }
 
   private static K.P3 P(Point3d p) => new(p.X, p.Y, p.Z);
@@ -402,6 +501,8 @@ public static partial class CorridorBowtieCommands
   /// <summary>Puts the meet stations taken out for the solve back into the regions that held them.</summary>
   private static void PutBackStations(Baseline baseline, SeamGroup g)
   {
+    if (!g.StationsOut) return;
+    g.StationsOut = false;
     foreach (var (st, reg) in g.DeletedStations)
     {
       var ri = IndexOfName(baseline, reg);
@@ -578,14 +679,19 @@ public static partial class CorridorBowtieCommands
   }
 
   /// <summary>
-  /// Where a repaired region meets the region it was cut from (the parent: the recorded parent assembly, or - for a repair
-  /// that recorded none - a neighbour when both neighbours carry the same assembly), the two sections at the boundary
-  /// station must describe the same design on both sides: the clip assembly with its targets cleared stands in for the stock
-  /// assembly. Differences beyond the tolerance mean the clip assembly is out of date.
+  /// Whether the clip assembly of a repair still describes the same design as the stock assembly it stands in for (the
+  /// copy is not a reference: a design change has to be made in both). Compared on the built sections, never at the shared
+  /// boundary station (where Civil 3D may hand back one section for both regions): sections of the repaired region (its
+  /// targets cleared, so unclipped) against sections of the parent region next to it, a few stations each side of the
+  /// boundary. A pair is comparable when both have the same number of links and daylight the same way (cut or fill); then
+  /// every link grade and every link width but the last (which ends at the ground) must agree. The best comparable pair
+  /// decides. Every pair looked at is reported, so a pass is visible too.
   /// </summary>
-  private static List<Dictionary<string, object?>> AssemblyDrift(Baseline baseline, Transaction transaction, SeamGroup g, double tol)
+  private static (List<Dictionary<string, object?>> Drift, List<Dictionary<string, object?>> Checks) AssemblyDrift(Baseline baseline, Transaction transaction,
+    SeamGroup g, double[] stations, double gradeTol, double widthTol)
   {
     var found = new List<Dictionary<string, object?>>();
+    var checks = new List<Dictionary<string, object?>>();
     var linkCode = g.Record.GetValueOrDefault("linkCode") is { Length: > 0 } lc ? lc : "Top";
     var pieces = new HashSet<string>(g.Pieces, StringComparer.OrdinalIgnoreCase);
     var recordedParent = g.Record.GetValueOrDefault("parentAssembly");
@@ -601,6 +707,22 @@ public static partial class CorridorBowtieCommands
       try { var t = r.GetTargets(); for (var i = 0; i < t.Count; i++) if (t[i].LogicalName is "ClipTarget" && t[i].TargetIds.Count > 0) return true; } catch { }
       return false;
     }
+    string? A(BaselineRegion? r) => r == null ? null : AssemblyName(transaction, SafeAssemblyId(r));
+    List<double> Near(BaselineRegion r, double at, int n) => stations
+      .Where(s => s > r.StartStation + 0.001 && s < r.EndStation - 0.001).OrderBy(s => Math.Abs(s - at)).Take(n).ToList();
+    static List<(double W, double G)> Links(K.SectionSample x)
+    {
+      var list = new List<(double, double)>();
+      for (var i = 1; i < x.Template.Count; i++)
+      {
+        var w = x.Template[i].Off - x.Template[i - 1].Off;
+        if (w < 1e-6) continue;
+        list.Add((w, (x.Template[i].Dz - x.Template[i - 1].Dz) / w));
+      }
+      return list;
+    }
+    static int Kind(List<(double W, double G)> l) => l.Count == 0 ? 0 : l[^1].G > 0.05 ? 1 : l[^1].G < -0.05 ? -1 : 0;
+
     foreach (var name in g.Pieces)
     {
       var ri = IndexOfName(baseline, name);
@@ -608,7 +730,6 @@ public static partial class CorridorBowtieCommands
       var region = regions[ri];
       var parent = pieceParents.GetValueOrDefault(name) ?? (g.Pieces.Count == 1 ? recordedParent : null);
       BaselineRegion? prev = ri > 0 ? regions[ri - 1] : null, next = ri < regions.Count - 1 ? regions[ri + 1] : null;
-      string? A(BaselineRegion? r) => r == null ? null : AssemblyName(transaction, SafeAssemblyId(r));
       if (string.IsNullOrWhiteSpace(parent))
       {
         var pa = A(prev); var na = A(next);
@@ -617,30 +738,59 @@ public static partial class CorridorBowtieCommands
         else if (pOk && !nOk) parent = pa;
         else if (nOk && !pOk) parent = na;
       }
-      if (string.IsNullOrWhiteSpace(parent)) continue;
+      if (string.IsNullOrWhiteSpace(parent)) { checks.Add(new Dictionary<string, object?> { ["region"] = name, ["result"] = "no parent assembly known: not checked" }); continue; }
       foreach (var (nb, at) in new[] { (prev, region.StartStation), (next, region.EndStation) })
       {
         if (nb == null || pieces.Contains(nb.Name) || IsRepair(nb) || !string.Equals(A(nb), parent, StringComparison.OrdinalIgnoreCase)) continue;
-        AppliedAssembly? mine = null, theirs = null;
-        try { mine = region.AppliedAssemblies.GetItemAt(at); } catch { }
-        try { theirs = nb.AppliedAssemblies.GetItemAt(at); } catch { }
-        if (mine == null || theirs == null) continue;
+        var mine = Near(region, at, 3); var theirs = Near(nb, at, 3);
         foreach (var (sideName, sign) in new[] { ("left", -1.0), ("right", 1.0) })
         {
-          var a = ReadSeamSection(mine, at, sign, linkCode); var b = ReadSeamSection(theirs, at, sign, linkCode);
-          if (a == null || b == null) continue;
-          var d = K.Refresh.Compare(a, b);
-          if (d.Within(tol, Math.Max(0.05, 5 * tol))) continue;
-          found.Add(new Dictionary<string, object?>
+          (double Grade, double Width, double Clip, double Stock, string What)? best = null;
+          var looked = 0;
+          foreach (var cs in mine)
           {
-            ["region"] = region.Name, ["neighbour"] = nb.Name, ["clipAssembly"] = A(region), ["stockAssembly"] = A(nb),
-            ["station"] = Math.Round(at, 3), ["side"] = sideName,
-            ["maxLevel"] = double.IsInfinity(d.MaxLevel) ? null : Math.Round(d.MaxLevel, 3), ["atOffset"] = Math.Round(d.AtOffset, 2),
-            ["reachDiff"] = Math.Round(d.ReachDiff, 3), ["startDiff"] = Math.Round(d.StartDiff, 3),
-          });
+            var a = ReadSeamSection(baseline, cs, sign, linkCode);
+            if (a == null || a.Clipped) continue;
+            var la = Links(a);
+            foreach (var ss in theirs)
+            {
+              var b = ReadSeamSection(baseline, ss, sign, linkCode);
+              if (b == null) continue;
+              var lb = Links(b);
+              looked++;
+              if (la.Count != lb.Count || Kind(la) != Kind(lb)) continue;
+              double dg = 0, dw = Math.Abs(a.StartOffset - b.StartOffset); var what = "";
+              for (var k = 0; k < la.Count; k++)
+              {
+                var gk = Math.Abs(la[k].G - lb[k].G);
+                if (gk > dg) { dg = gk; what = $"link {k + 1}: grade {la[k].G * 100:0.##}% (clip) against {lb[k].G * 100:0.##}% (stock)"; }
+                if (k < la.Count - 1)
+                {
+                  var wk = Math.Abs(la[k].W - lb[k].W);
+                  if (wk > dw) { dw = wk; if (wk > widthTol) what = $"link {k + 1}: {la[k].W:0.###} m wide (clip) against {lb[k].W:0.###} m (stock)"; }
+                }
+              }
+              if (best == null || dg + dw < best.Value.Grade + best.Value.Width) best = (dg, dw, cs, ss, what);
+            }
+          }
+          var row = new Dictionary<string, object?> { ["region"] = name, ["neighbour"] = nb.Name, ["side"] = sideName, ["boundary"] = Math.Round(at, 3), ["pairsLooked"] = looked };
+          if (best == null) { row["result"] = "no comparable pair (different number of links, or cut against fill): not decided here"; checks.Add(row); continue; }
+          row["clipStation"] = Math.Round(best.Value.Clip, 3); row["stockStation"] = Math.Round(best.Value.Stock, 3);
+          row["maxGradeDiff"] = Math.Round(best.Value.Grade, 5); row["maxWidthDiff"] = Math.Round(best.Value.Width, 4);
+          var drift = best.Value.Grade > gradeTol || best.Value.Width > widthTol;
+          row["result"] = drift ? "differs" : "same design";
+          checks.Add(row);
+          if (drift)
+            found.Add(new Dictionary<string, object?>
+            {
+              ["region"] = name, ["neighbour"] = nb.Name, ["clipAssembly"] = A(region), ["stockAssembly"] = A(nb), ["side"] = sideName,
+              ["clipStation"] = Math.Round(best.Value.Clip, 3), ["stockStation"] = Math.Round(best.Value.Stock, 3),
+              ["maxGradeDiff"] = Math.Round(best.Value.Grade, 5), ["maxWidthDiff"] = Math.Round(best.Value.Width, 4), ["what"] = best.Value.What,
+            });
         }
       }
     }
-    return found;
+    return (found, checks);
   }
+
 }
