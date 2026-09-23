@@ -74,8 +74,14 @@ export function isApprovalRequired(target: ApprovalTarget): boolean {
   return hasApprovalRisk(target);
 }
 
+const READ_ONLY_CAPABILITIES = new Set<ToolCapability>(["query", "inspect", "analyze"]);
+
 export function hasApprovalRisk(target: ApprovalTarget): boolean {
   const mutatesState = target.capabilities.some((capability) => MUTATING_CAPABILITIES.has(capability));
+  // A read-only report of an action (e.g. bowtie_fix_report) names that action but changes nothing.
+  const readOnlyReport = /_report$/i.test(target.action) && target.safeForRetry &&
+    target.capabilities.length > 0 && target.capabilities.every((capability) => READ_ONLY_CAPABILITIES.has(capability));
+  if (readOnlyReport) return false;
   return (
     target.capabilities.some((capability) => ["delete", "import", "export"].includes(capability)) ||
     EXPLICIT_APPROVAL_ACTION.test(target.action) ||
