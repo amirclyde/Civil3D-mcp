@@ -95,6 +95,7 @@ public static partial class CorridorBowtieCommands
     var maxLevelStep = PluginRuntime.GetOptionalDouble(parameters, "maxLevelStep") ?? 0.30;
     var acceptOffSurfaceEnds = PluginRuntime.GetOptionalBool(parameters, "acceptOffSurfaceEnds") ?? false;
     var ignoreAssemblyDrift = PluginRuntime.GetOptionalBool(parameters, "ignoreAssemblyDrift") ?? false;
+    var updateSurfaces = PluginRuntime.GetOptionalBool(parameters, "updateSurfaces") ?? true;
     var adjustFromArg = (PluginRuntime.GetOptionalString(parameters, "adjustFrom") ?? "auto").Trim().ToLowerInvariant();
     var levelRuleArg = (PluginRuntime.GetOptionalString(parameters, "levelRule") ?? "no_steeper").Trim().ToLowerInvariant();
     if (adjustFromArg is not ("auto" or "hinge" or "last_link"))
@@ -437,11 +438,16 @@ public static partial class CorridorBowtieCommands
         g.Message = $"{moved}: replaced, mapped again, the built corridor is clean.";
       }
       Dictionary<string, object?>? restore = null;
+      Dictionary<string, object?>? surfaces = null;
       if (dryRun) restore = RestoreAll();
       else
       {
         var differ = MappingsDiffer().Where(d => !groups.Any(g => g.Outcome == "refreshed" && g.Pieces.Any(p => d.Contains($"'{p}'")))).ToList();
         if (differ.Count > 0) warnings.Add($"Target mappings not as they were on repairs that were not refreshed: {string.Join(", ", differ)}.");
+        // the corridor surfaces follow the valleys as they now are, and their outline is the corridor's as built now
+        if (updateSurfaces)
+          try { surfaces = UpdateValleySurfaces(transaction, corridor, baselineIndex, null, true, false, checkTolerance); }
+          catch (Exception ex) { warnings.Add($"The corridor surfaces were not updated ({ex.Message}): run bowtie_surface."); }
       }
 
       var rows = groups.Select(g => new Dictionary<string, object?>
@@ -494,6 +500,7 @@ public static partial class CorridorBowtieCommands
           $"{summary["refreshed"]} refreshed, {summary["wouldRefresh"]} would be refreshed, {summary["unchanged"]} unchanged, {summary["notNeeded"]} no longer needed, {summary["refused"]} refused, " +
           $"{summary["staleAssembly"]} with a stale clip assembly, {summary["reverted"]} put back; {summary["cleanAfter"]} of {groups.Count} clean in the built corridor.",
         ["repairs"] = rows,
+        ["surfaces"] = surfaces != null ? SurfaceSummary(surfaces) : null,
         ["legacyValleys"] = legacy.Count > 0 ? legacy : null,
         ["otherClipTargets"] = foreign.Count > 0 ? foreign : null,
         ["warnings"] = warnings,

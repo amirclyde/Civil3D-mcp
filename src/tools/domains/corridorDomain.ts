@@ -484,6 +484,7 @@ const CorridorBowtieUnfixArgsSchema = z.object({
   restoreAssembly: z.boolean().optional(),
   rebuild: z.boolean().optional(),
   dryRun: z.boolean().optional(),
+  updateSurfaces: z.boolean().optional(),
 });
 
 const CorridorBowtieFixReportArgsSchema = z.object({
@@ -520,10 +521,25 @@ const CorridorBowtieRefreshArgsSchema = z.object({
   driftTolerance: z.number().nonnegative().optional(),
   gradeTolerance: z.number().nonnegative().optional(),
   searchMargin: z.number().min(5).optional(),
+  updateSurfaces: z.boolean().optional(),
 });
 
 const CorridorBowtieRefreshPreviewArgsSchema = CorridorBowtieRefreshArgsSchema.extend({
   action: z.literal("bowtie_refresh_preview"),
+});
+
+const CorridorBowtieSurfaceArgsSchema = z.object({
+  action: z.literal("bowtie_surface"),
+  name: z.string(),
+  baselineIndex: z.number().int().nonnegative().optional(),
+  surfaceName: z.string().optional(),
+  dryRun: z.boolean().optional(),
+  outline: z.boolean().optional(),
+  tolerance: z.number().nonnegative().optional(),
+});
+
+const CorridorBowtieSurfacePreviewArgsSchema = CorridorBowtieSurfaceArgsSchema.extend({
+  action: z.literal("bowtie_surface_preview"),
 });
 
 const CorridorRegionStationsArgsSchema = z.object({
@@ -557,6 +573,7 @@ const CorridorBowtieCheckArgsSchema = z.object({
   valleyTolerance: z.number().nonnegative().optional(),
   joinTolerance: z.number().nonnegative().optional(),
   minTurnDegrees: z.number().nonnegative().optional(),
+  checkSurfaces: z.boolean().optional(),
 });
 
 // ─── Canonical input shape ────────────────────────────────────────────────────
@@ -587,6 +604,7 @@ const canonicalCorridorInputShape = {
     "bowtie_fix_report",
     "bowtie_unfix",
     "bowtie_refresh",
+    "bowtie_surface",
     "bowtie_check",
     "region_stations",
     "section",
@@ -599,7 +617,7 @@ const canonicalCorridorInputShape = {
     "export_solids",
   ]),
   name: z.string().optional().describe("Corridor name."),
-  surfaceName: z.string().optional().describe("surface_*: corridor surface name. bowtie_valley / bowtie_refresh: daylight surface (default: the region's surface target)."),
+  surfaceName: z.string().optional().describe("surface_*: corridor surface name. bowtie_valley / bowtie_refresh: daylight surface (default: the region's surface target). bowtie_surface: only this corridor surface (default: all of the corridor)."),
   linkCodes: z.array(CorridorLinkCodeSchema).optional().describe("surface_create / add_link_code: link codes (string or {code, breakline})."),
   featureLineCodes: z.array(z.string()).optional(),
   overhangCorrection: z.enum(["none", "top_links", "bottom_links"]).optional(),
@@ -661,7 +679,7 @@ const canonicalCorridorInputShape = {
   namePrefix: z.string().optional().describe("region_isolate: name prefix for isolated regions (default BT)."),
   carrySurfaceTargets: z.boolean().optional().describe("region_isolate with assemblyName: give the new assembly's surface targets the parent region's surface in the same step (default true), so no rebuild ever runs with a surface target missing."),
   matchParent: z.boolean().optional().describe("region_split / region_isolate: copy the parent's assembly, targets and frequency onto the new pieces (default true)."),
-  dryRun: z.boolean().optional().describe("region_isolate: report the splits without changing the corridor. bowtie_valley: compute and check without changing anything. bowtie_refresh: the whole refresh done, then put back by hand and checked - reports what a real run would do, including the check of the rebuilt corridor; the corridor is left as it was (Civil 3D shows the drawing as changed; needs no approval)."),
+  dryRun: z.boolean().optional().describe("region_isolate: report the splits without changing the corridor. bowtie_valley: compute and check without changing anything. bowtie_refresh: the whole refresh done, then put back by hand and checked - reports what a real run would do, including the check of the rebuilt corridor; the corridor is left as it was (Civil 3D shows the drawing as changed; needs no approval). bowtie_surface: check the surfaces as they are, change nothing (no approval)."),
   firstRegionIndex: z.number().int().nonnegative().optional().describe("region_merge: first region of the range to merge."),
   lastRegionIndex: z.number().int().nonnegative().optional().describe("region_merge: last region of the range to merge."),
   templateStationBefore: z.number().optional().describe("bowtie_valley: applied station whose section is the incoming leg's template (default: last applied station at/before startStation; must be unclipped)."),
@@ -673,7 +691,7 @@ const canonicalCorridorInputShape = {
   addStations: z.boolean().optional().describe("bowtie_valley: add a corridor station on each leg where the valley meets the daylight surface (default true)."),
   createAlignment: z.boolean().optional().describe("bowtie_valley: create the valley alignment (default true; false = compute only)."),
   minOffset: z.number().nonnegative().optional().describe("bowtie_check: only links reaching beyond this offset (e.g. past a drain's outer wall)."),
-  tolerance: z.number().nonnegative().optional().describe("bowtie_check: crossings closer than this to a link end count as touching (default 0.005 m). bowtie_refresh: a valley that moved less than this stays as it is (default 0.01 m)."),
+  tolerance: z.number().nonnegative().optional().describe("bowtie_check: crossings closer than this to a link end count as touching (default 0.005 m). bowtie_refresh: a valley that moved less than this stays as it is (default 0.01 m). bowtie_surface: largest level difference between surface and valley line (default 0.005 m)."),
   valleyTolerance: z.number().nonnegative().optional().describe("bowtie_check: largest distance, in plan and in level, of a section's Valley end from the valley line it is clipped to (default 0.01 m)."),
   joinTolerance: z.number().nonnegative().optional().describe("bowtie_check: how far the built surface may leave the valley line between neighbouring Valley ends before a note says the stations are too far apart there (default 0.05 m; does not change the status)."),
   allowMismatch: z.boolean().optional().describe("bowtie_valley / bowtie_refresh: build the valley even when a check fails (different inside sections, meet stations not straddling the bend or outside the region); default false = refuse."),
@@ -705,6 +723,9 @@ const canonicalCorridorInputShape = {
   assemblyMap: z.record(z.string()).optional().describe("bowtie_fix: clip assembly per parent assembly, e.g. {\"MD302 Drain 3.3\": \"MD302 Drain 3.3 LDC04\", \"MD303 Drain 3.6\": \"MD303 Drain 3.6 LDC04\"} - for a clash range that spans regions with different assemblies (each piece gets its own). Parent assemblies not listed fall back to assemblyName."),
   merge: z.boolean().optional().describe("bowtie_unfix: merge the region back with the pieces it was cut from (default true)."),
   restoreAssembly: z.boolean().optional().describe("bowtie_unfix: give the region back the assembly it had before the repair (default true)."),
+  outline: z.boolean().optional().describe("bowtie_surface: renew the 'Corridor outline' boundary of each corridor surface from the sections as built now (default true; added where a surface has no boundary; a boundary of another name is left alone)."),
+  updateSurfaces: z.boolean().optional().describe("bowtie_fix / bowtie_unfix / bowtie_refresh: afterwards put the valley lines into the corridor surfaces as breaklines and renew their outline (bowtie_surface; default true)."),
+  checkSurfaces: z.boolean().optional().describe("bowtie_check: also check the corridor surfaces - each follows every valley line and is closed (default true; read only)."),
 };
 
 // ─── Domain definition ────────────────────────────────────────────────────────
@@ -718,7 +739,7 @@ type CorridorRawArgs = Record<string, unknown>;
  */
 function resolveCorridorAction(rawArgs: CorridorRawArgs): { action: string; args: CorridorRawArgs } {
   const action = String(rawArgs.action ?? "");
-  if ((action === "bowtie_valley" || action === "bowtie_refresh" || action === "bowtie_seam" || action === "bowtie_unfix") && rawArgs.dryRun === true) {
+  if ((action === "bowtie_valley" || action === "bowtie_refresh" || action === "bowtie_seam" || action === "bowtie_unfix" || action === "bowtie_surface") && rawArgs.dryRun === true) {
     const preview = `${action}_preview`;
     return { action: preview, args: { ...rawArgs, action: preview } };
   }
@@ -820,8 +841,9 @@ async function runBowtieRefresh(args: CorridorRawArgs, dryRun: boolean) {
       tolerance: args.tolerance ?? null, driftTolerance: args.driftTolerance ?? null, gradeTolerance: args.gradeTolerance ?? null, searchMargin: args.searchMargin ?? null,
       levelRule: args.levelRule ?? null, adjustFrom: args.adjustFrom ?? null, maxLevelAdjust: args.maxLevelAdjust ?? null,
       maxLevelStep: args.maxLevelStep ?? null, acceptOffSurfaceEnds: args.acceptOffSurfaceEnds ?? null,
-      ignoreAssemblyDrift: args.ignoreAssemblyDrift ?? null,
+      ignoreAssemblyDrift: args.ignoreAssemblyDrift ?? null, updateSurfaces: args.updateSurfaces ?? null,
     }, { timeoutMs: REFRESH_TIMEOUT_MS });
+    if (!dryRun && seams?.surfaces != null) seams.surfaces = summaryWithRecheck(seams.surfaces, await recheckSurfaces(appClient, args.name, args.baselineIndex));
     const legacyValleys = (seams?.legacyValleys ?? []) as string[];
     if (legacyValleys.length === 0) return seams;
     // older repairs made with bowtie_valley (alignments): their own refresh, as before
@@ -847,6 +869,52 @@ function finishFixReport(entry: FixReport, report: unknown, error: unknown) {
   entry.report = report ?? null;
   entry.progress.current = null;
   entry.error = error == null ? null : error instanceof Error ? error.message : String(error);
+}
+
+/** Civil 3D rebuilds the corridor surfaces only when the change's transaction is committed, so the check a real
+ * bowtieSurface (or bowtie_unfix / bowtie_refresh) makes inside it sees each surface as it was before (FL-03, 24 Sep
+ * 2026: the in-run check reported holes and an area gap that a read straight after showed were not there). The surfaces
+ * are checked again in a new read and that check replaces the in-run one. */
+async function recheckSurfaces(appClient: { sendCommand: (m: string, p: Record<string, unknown>, o?: any) => Promise<any> }, corridorName: unknown, baselineIndex: unknown) {
+  try {
+    return await appClient.sendCommand("bowtieSurface", { corridorName, baselineIndex: baselineIndex ?? 0, surfaceName: null, dryRun: true, outline: true, tolerance: null });
+  } catch (e) { return { error: e instanceof Error ? e.message : String(e) }; }
+}
+
+/** The full bowtieSurface report of a real run with each surface's status and check taken from the read after it. */
+function withRecheck(full: any, dry: any) {
+  if (dry?.error) return { ...full, recheckError: dry.error, checkedAfterCommit: false };
+  const byName = new Map(((dry?.surfaces ?? []) as any[]).map((r) => [r?.surface, r]));
+  const surfaces = ((full?.surfaces ?? []) as any[]).map((r) => {
+    const d: any = byName.get(r?.surface);
+    return d ? { ...r, status: d.status, check: d.check, upToDate: d.upToDate } : r;
+  });
+  return { ...full, surfaces, checkedAfterCommit: true };
+}
+
+/** A surfaces summary (bowtie_unfix / bowtie_refresh) with the status and check taken from the read after the change. */
+function summaryWithRecheck(summary: any, dry: any) {
+  if (summary == null) return summary;
+  if (dry?.error) return { ...summary, recheckError: dry.error, checkedAfterCommit: false };
+  const fresh = summarizeSurfaces(dry);
+  const byName = new Map(fresh.surfaces.map((r: any) => [r.surface, r]));
+  const surfaces = ((summary?.surfaces ?? []) as any[]).map((r) => {
+    const d: any = byName.get(r?.surface);
+    return d ? { ...r, status: d.status, maxLevelOffValley: d.maxLevelOffValley, holesOnValleys: d.holesOnValleys, areaNotCovered: d.areaNotCovered, worstAt: d.worstAt, boundaryNotReached: d.boundaryNotReached } : r;
+  });
+  return { ...summary, surfaces, allClosedAndFollowing: surfaces.length > 0 && surfaces.every((r: any) => r.status === "closed_and_following"), checkedAfterCommit: true };
+}
+
+/** bowtieSurface's full report cut to one line per surface, for bowtie_fix's report. */
+function summarizeSurfaces(full: any) {
+  const rows = ((full?.surfaces ?? []) as any[]).map((r) => ({
+    surface: r?.surface, status: r?.status, changed: r?.valleyBreaklines?.added !== undefined,
+    valleyBreaklines: r?.valleyBreaklines?.added ?? r?.valleyBreaklines?.inSurface, outlineUpdated: r?.outline?.updated ?? false,
+    maxLevelOffValley: r?.check?.maxLevelOffValley, holesOnValleys: r?.check?.holesOnValleys, areaNotCovered: r?.check?.areaNotCovered, worstAt: r?.check?.worstAt,
+    boundaryNotReached: r?.check?.boundaryNotReached,
+  }));
+  return { surfaces: rows, valleyParts: full?.valleyParts, allClosedAndFollowing: rows.length > 0 && rows.every((r) => r.status === "closed_and_following"),
+    rebuildError: full?.rebuildError ?? null, warnings: full?.warnings ?? [] };
 }
 
 export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
@@ -1457,7 +1525,7 @@ export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
       capabilities: ["edit"],
       requiresActiveDrawing: true,
       safeForRetry: false,
-      pluginMethods: ["bowtieBends", "bowtieSeam", "isolateCorridorRanges", "getCorridorTargetMappings", "setCorridorTargetMappings", "checkCorridorBowties", "bowtieUnfix"],
+      pluginMethods: ["bowtieBends", "bowtieSeam", "isolateCorridorRanges", "getCorridorTargetMappings", "setCorridorTargetMappings", "checkCorridorBowties", "bowtieUnfix", "bowtieSurface"],
       execute: async (args) => {
         assertNoBowtieJobRunning();
         const entry = startFixReport(args);
@@ -1525,7 +1593,7 @@ export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
             for (const p of [...pieces].sort((a, b) => b.start - a.start)) {
               if (done.has(p.name)) continue;
               const undo = await call("bowtieUnfix", {
-                corridorName: args.name, baselineIndex, regionName: p.name, merge: true, restoreAssembly: true, rebuild: true, dryRun: false,
+                corridorName: args.name, baselineIndex, regionName: p.name, merge: true, restoreAssembly: true, rebuild: true, dryRun: false, updateSurfaces: false,
                 parentRegion: p.parentRegion, parentAssembly: p.parentAssembly, splitBefore: p.splitBefore, splitAfter: p.splitAfter, parentFrequency: p.parentFrequency,
               });
               ok = ok && undo.ok;
@@ -1605,7 +1673,7 @@ export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
           // 6. verify on the built corridor
           const check = await call("checkCorridorBowties", {
             corridorName: args.name, baselineIndex, side, startStation: from - 5, endStation: to + 5,
-            linkCode: args.linkCode ?? null, minOffset: null, code: null, tolerance: null, maxListed: null,
+            linkCode: args.linkCode ?? null, minOffset: null, code: null, tolerance: null, maxListed: null, surfaces: false,
           });
           if (!check.ok) return await rollback("check", `The result could not be checked: ${check.error}.`);
           stages.check = check.value;
@@ -1633,7 +1701,7 @@ export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
             return { ...base, outcome: "skipped", message: `Region '${bend.region}' is already repaired; redo needs the clip assembly to repair it with (assemblyName or assemblyMap).`, stages: {} };
           if (current && targetClips.has(current.toLowerCase()) && args.force !== true)
             return { ...base, outcome: "skipped", message: `Region '${bend.region}' is already repaired with '${current}' (pass force to repair it again anyway).`, stages: {} };
-          const undo = await call("bowtieUnfix", { corridorName: args.name, baselineIndex, regionName: bend.region, merge: true, restoreAssembly: true, rebuild: true, dryRun: false, inferParent: true });
+          const undo = await call("bowtieUnfix", { corridorName: args.name, baselineIndex, regionName: bend.region, merge: true, restoreAssembly: true, rebuild: true, dryRun: false, inferParent: true, updateSurfaces: false });
           if (!undo.ok) return { ...base, outcome: "failed", message: `The previous repair of '${bend.region}' could not be undone: ${undo.error}. Nothing was changed.`, stages: {} };
           const undone = { region: bend.region, previousAssembly: current, targetsCleared: undo.value?.targetsCleared, valleyLinesErased: undo.value?.valleyLinesErased, stationsDeleted: undo.value?.stationsDeleted, pieces: undo.value?.pieces, rebuildError: undo.value?.rebuildError, warnings: undo.value?.warnings };
           const fresh: any = await fixOne({ ...bend, repaired: false });
@@ -1664,6 +1732,20 @@ export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
           results.push(r); entry.results.push({ startStation: r.startStation, endStation: r.endStation, side: r.side, outcome: r.outcome, message: r.message, regions: (r as any).regions ?? null, highlight: (r as any).highlight ?? null });
           entry.progress.done = results.length;
         }
+        // once, after every bend: the valley lines into the corridor surfaces as breaklines, the outline renewed, and checked
+        // (closed, and on every valley). Nothing to do when no bend was touched.
+        let surfaces: unknown = null;
+        const touched = results.some((r) => !["skipped", "refused"].includes(String(r.outcome)));
+        if (touched && args.updateSurfaces !== false) {
+          entry.progress.current = "corridor surfaces";
+          const sf = await call("bowtieSurface", { corridorName: args.name, baselineIndex, dryRun: false, outline: true });
+          if (sf.ok) {
+            // checked again in a new read: inside the change's own transaction the surfaces are not rebuilt yet
+            const dry = await call("bowtieSurface", { corridorName: args.name, baselineIndex, dryRun: true, outline: true });
+            surfaces = summarizeSurfaces(withRecheck(sf.value, dry.ok ? dry.value : { error: dry.error }));
+          }
+          else surfaces = { error: sf.error, message: "The corridor surfaces were not updated: run bowtie_surface." };
+        }
         const count = (o: string) => results.filter((r) => r.outcome === o).length;
         const summary = { bends: results.length, repaired: count("repaired"), keptPrevious: count("kept_previous"), skipped: count("skipped"), refused: count("refused"), rolledBack: count("rolled_back"), failed: count("failed") };
         return {
@@ -1673,6 +1755,7 @@ export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
           message: bends.length === 0 ? "No bend in the range." :
             `${summary.repaired} repaired, ${summary.keptPrevious} kept on their previous repair, ${summary.skipped} skipped (no bowtie or already repaired), ${summary.refused} refused as they stand, ${summary.rolledBack} rolled back, ${summary.failed} failed.`,
           highlight: results.filter((r) => r.highlight || (typeof r.slopeChange === "number" && r.slopeChange > 0.1)).map((r) => ({ startStation: r.startStation, endStation: r.endStation, side: r.side, sectionChanges: r.highlight, levelMove: r.levelMove, slopeChange: r.slopeChange })),
+          surfaces,
           bends: results,
         };
       }); finishFixReport(entry, fixReport, null); return fixReport; } catch (e) { finishFixReport(entry, null, e); throw e; } };
@@ -1722,12 +1805,15 @@ export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
       requiresActiveDrawing: true,
       safeForRetry: false,
       pluginMethods: ["bowtieUnfix"],
-      execute: async (args) => await withApplicationConnection(
-        async (appClient) => await appClient.sendCommand("bowtieUnfix", {
+      execute: async (args) => await withApplicationConnection(async (appClient) => {
+        const r: any = await appClient.sendCommand("bowtieUnfix", {
           corridorName: args.name, baselineIndex: args.baselineIndex ?? 0, regionName: args.regionName,
           merge: args.merge ?? true, restoreAssembly: args.restoreAssembly ?? true, rebuild: args.rebuild ?? true, dryRun: false,
-        }),
-      ),
+          updateSurfaces: args.updateSurfaces ?? true,
+        });
+        if (r?.surfaces != null) r.surfaces = summaryWithRecheck(r.surfaces, await recheckSurfaces(appClient, args.name, args.baselineIndex));
+        return r;
+      }),
     },
     // bowtie_unfix with dryRun: true resolves here - read-only, so no approval.
     bowtie_unfix_preview: {
@@ -1781,6 +1867,42 @@ export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
       safeForRetry: true,
       pluginMethods: ["bowtieRefreshSeams", "bowtieRefresh"],
       execute: async (args) => await runBowtieRefresh(args, true),
+    },
+    // bowtie_surface: each corridor surface carries every repair's valley line as a breakline (trimmed to where it is a seam
+    // of the two sides' daylight: not across the drain, not the level run-on) and the corridor outline as its boundary; then
+    // checked - on every valley within tolerance, and closed. bowtie_fix / unfix / refresh call it themselves.
+    bowtie_surface: {
+      action: "bowtie_surface",
+      inputSchema: CorridorBowtieSurfaceArgsSchema,
+      responseSchema: GenericCorridorResponseSchema,
+      capabilities: ["edit"],
+      requiresActiveDrawing: true,
+      // changes the surfaces' definitions and rebuilds the corridor: approval first, like every other change (safe to repeat)
+      safeForRetry: false,
+      pluginMethods: ["bowtieSurface"],
+      execute: async (args) => await withApplicationConnection(async (appClient) => {
+        const full = await appClient.sendCommand("bowtieSurface", {
+          corridorName: args.name, baselineIndex: args.baselineIndex ?? 0, surfaceName: args.surfaceName ?? null,
+          dryRun: false, outline: args.outline ?? true, tolerance: args.tolerance ?? null,
+        });
+        return withRecheck(full, await recheckSurfaces(appClient, args.name, args.baselineIndex));
+      }),
+    },
+    // bowtie_surface with dryRun: true resolves here - the surfaces checked as they are, read-only, no approval.
+    bowtie_surface_preview: {
+      action: "bowtie_surface_preview",
+      inputSchema: CorridorBowtieSurfacePreviewArgsSchema,
+      responseSchema: GenericCorridorResponseSchema,
+      capabilities: ["query", "analyze"],
+      requiresActiveDrawing: true,
+      safeForRetry: true,
+      pluginMethods: ["bowtieSurface"],
+      execute: async (args) => await withApplicationConnection(
+        async (appClient) => await appClient.sendCommand("bowtieSurface", {
+          corridorName: args.name, baselineIndex: args.baselineIndex ?? 0, surfaceName: args.surfaceName ?? null,
+          dryRun: true, outline: args.outline ?? true, tolerance: args.tolerance ?? null,
+        }),
+      ),
     },
     region_stations: {
       action: "region_stations",
@@ -1846,6 +1968,7 @@ export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
           valleyTolerance: args.valleyTolerance ?? null,
           joinTolerance: args.joinTolerance ?? null,
           minTurnDegrees: args.minTurnDegrees ?? null,
+          surfaces: args.checkSurfaces ?? true,
         }),
       ),
     },
@@ -1854,7 +1977,7 @@ export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
     {
       toolName: "civil3d_corridor",
       displayName: "Civil 3D Corridor",
-      description: "Creates and reads Civil 3D corridors (create = assembly on an alignment + profile, or on a feature line, one baseline and region), controls rebuild, computes volumes, manages regions (add, split, isolate station ranges, merge, delete), predicts bowties (bowtie_predict: where the inside edge runs backwards or crosses itself, with a split plan), builds the valley line of a bend as a clip target (bowtie_valley; refuses bends whose legs differ or whose valley meets the ground on the wrong side or outside the region) and refreshes every repair after a design change (bowtie_refresh: each valley solved again on the design as it now is, replaced where it moved, a stale clip assembly or a bend that moved reported; one transaction, a dry run puts everything back), repairs one bend in one step (bowtie_fix: solve, isolate the clash range with an optional clip assembly whose surface targets are carried over, write the valley lines, map ClipTarget + ClipElev, rebuild, check), verifies the built result (bowtie_check: status verified / invalid_candidate / unsupported / insufficient_data from link crossings, feature-line loops, each repair's sections ending on its valley line with a continuous join, and whether the stations at each unrepaired bend are dense enough to show a bowtie), reports long runs (bowtie_fix_report: progress and results of bowtie_fix / bowtie_refresh, read-only), lists or removes a region's added stations (region_stations); dry runs and listings need no approval, assembly frequency and subassembly target mappings, builds corridor surfaces (link/feature-line codes, overhang correction, boundaries) and extracts corridor solids through a single domain tool.",
+      description: "Creates and reads Civil 3D corridors (create = assembly on an alignment + profile, or on a feature line, one baseline and region), controls rebuild, computes volumes, manages regions (add, split, isolate station ranges, merge, delete), predicts bowties (bowtie_predict: where the inside edge runs backwards or crosses itself, with a split plan), builds the valley line of a bend as a clip target (bowtie_valley; refuses bends whose legs differ or whose valley meets the ground on the wrong side or outside the region) and refreshes every repair after a design change (bowtie_refresh: each valley solved again on the design as it now is, replaced where it moved, a stale clip assembly or a bend that moved reported; one transaction, a dry run puts everything back), repairs one bend in one step (bowtie_fix: solve, isolate the clash range with an optional clip assembly whose surface targets are carried over, write the valley lines, map ClipTarget + ClipElev, rebuild, check), verifies the built result (bowtie_check: status verified / invalid_candidate / unsupported / insufficient_data from link crossings, feature-line loops, each repair's sections ending on its valley line with a continuous join, and whether the stations at each unrepaired bend are dense enough to show a bowtie), keeps each corridor surface closed and on every valley line (bowtie_surface: the valleys as breaklines, trimmed off the drain and the run-on, the 'Corridor outline' boundary renewed, then checked - fix / unfix / refresh do it themselves), reports long runs (bowtie_fix_report: progress and results of bowtie_fix / bowtie_refresh, read-only), lists or removes a region's added stations (region_stations); dry runs and listings need no approval, assembly frequency and subassembly target mappings, builds corridor surfaces (link/feature-line codes, overhang correction, boundaries) and extracts corridor solids through a single domain tool.",
       inputShape: canonicalCorridorInputShape,
       supportedActions: [
         "list",
@@ -1885,6 +2008,8 @@ export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
         "bowtie_unfix_preview",
         "bowtie_refresh",
         "bowtie_refresh_preview",
+        "bowtie_surface",
+        "bowtie_surface_preview",
         "bowtie_check",
         "region_stations",
         "region_stations_list",

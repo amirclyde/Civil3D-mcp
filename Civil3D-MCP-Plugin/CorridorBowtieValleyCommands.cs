@@ -1892,6 +1892,7 @@ public static partial class CorridorBowtieCommands
     var valleyTolerance = PluginRuntime.GetOptionalDouble(parameters, "valleyTolerance") ?? 0.01;
     var joinTolerance = PluginRuntime.GetOptionalDouble(parameters, "joinTolerance") ?? 0.05;
     var minTurnDegrees = PluginRuntime.GetOptionalDouble(parameters, "minTurnDegrees") ?? 3.0;
+    var checkSurfaces = PluginRuntime.GetOptionalBool(parameters, "surfaces") ?? true;
     if (side is not ("left" or "right" or "both"))
       throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "side must be left, right or both.");
     if (tolerance < 0)
@@ -1910,6 +1911,28 @@ public static partial class CorridorBowtieCommands
       var b = end ?? all[^1];
       var check = CheckBuilt(baseline, transaction, all, a, b, side == "both" ? new[] { "left", "right" } : new[] { side }, linkCode, minOffset, code, maxListed, tolerance,
         valleyTolerance, joinTolerance, minTurnDegrees);
+      // the corridor surfaces as they are (read only): do they carry every valley, and are they closed?
+      Dictionary<string, object?>? surfaceBlock = null;
+      var notes = check.Notes.ToList();
+      if (checkSurfaces && corridor.CorridorSurfaces.Count > 0)
+      {
+        try
+        {
+          surfaceBlock = SurfaceSummary(UpdateValleySurfaces(transaction, corridor, baselineIndex, null, true, true, tolerance));
+          // the join notes measure the corridor's own triangles between two sections; a surface that carries the valley as a
+          // breakline follows it all the same, so they only matter where a surface does not
+          var rowsS = surfaceBlock["surfaces"] as List<Dictionary<string, object?>> ?? new();
+          var following = rowsS.Count > 0 && rowsS.All(r => r["status"] is "closed_and_following" or "follows_valleys_no_outline");
+          if (following)
+          {
+            var dropped = notes.RemoveAll(n => n.Contains("the built surface leaves the valley line"));
+            if (dropped > 0) notes.Add($"The corridor surfaces carry the valley lines as breaklines and follow them within {tolerance} m, so the chords between sections ({dropped} join note(s)) do not show in the surfaces.");
+          }
+          else if (notes.Any(n => n.Contains("the built surface leaves the valley line")))
+            notes.Add("Run bowtie_surface: it puts the valley lines into the corridor surfaces as breaklines, so the surfaces follow them exactly.");
+        }
+        catch (Exception ex) { surfaceBlock = new Dictionary<string, object?> { ["error"] = ex.Message }; }
+      }
       return new Dictionary<string, object?>
       {
         ["corridorName"] = corridor.Name,
@@ -1918,7 +1941,8 @@ public static partial class CorridorBowtieCommands
         ["endStation"] = b,
         ["status"] = check.Status,
         ["reasons"] = check.Reasons,
-        ["notes"] = check.Notes,
+        ["notes"] = notes,
+        ["surfaces"] = surfaceBlock,
         ["planCrossingsClear"] = check.PlanClear,
         // kept for older callers: plan crossings and loops only - a clip that cuts every link to a stub is 'clean' too; read status
         ["clean"] = check.PlanClear,
@@ -1934,7 +1958,8 @@ public static partial class CorridorBowtieCommands
           "Repairs (valley lines written by bowtie_seam on ClipTarget): each Valley end on the valley line within `valleyTolerance` (level too where ClipElev is mapped), " +
           "and no section crossing the valley line beyond the drain; how closely the surface follows the valley between neighbouring Valley ends (chords sampled every 0.1 m) is reported, with a note beyond `joinTolerance`. " +
           "Bends not repaired (turning at least minTurnDegrees): an applied station of each leg within reach x tan(turn/2) of an angle point, or two on a curve whose radius the inside reach exceeds - otherwise a bowtie there cannot show. " +
-          "status: verified | invalid_candidate | unsupported (clip targets not written by bowtie_seam: plan crossings only there) | insufficient_data.",
+          "status: verified | invalid_candidate | unsupported (clip targets not written by bowtie_seam: plan crossings only there) | insufficient_data. " +
+          "surfaces (read only, as bowtie_surface dryRun): each corridor surface sampled every 0.25 m along every valley (level within `tolerance`, no hole) and its plan area against the corridor outline.",
       };
     });
   }

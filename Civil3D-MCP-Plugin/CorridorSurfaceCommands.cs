@@ -486,7 +486,13 @@ public static class CorridorSurfaceCommands
   /// covered ground, not on its edge, so points coded Valley are left out, except the outer end of each valley.
   /// The polygon is static: add it again after a design change.
   /// </summary>
-  private static (Point3dCollection Points, Dictionary<string, object?> Info) ComputeOutline(Corridor corridor, int baselineIndex)
+  /// <param name="valleyTips">Where each repair's valley meets the ground (the outer end of the valley line, run-on left out):
+  /// the corner of the outline at a clipped run is taken there instead of at the outermost section end on the valley, which
+  /// stops short of it by up to a station spacing (bowtie_surface puts the valley in the surface as a breakline up to its tip,
+  /// so the surface reaches it).</param>
+  internal static Point3dCollection ComputeOutlinePolygon(Corridor corridor, int baselineIndex, IReadOnlyList<Point3d>? valleyTips = null) => ComputeOutline(corridor, baselineIndex, valleyTips).Points;
+
+  private static (Point3dCollection Points, Dictionary<string, object?> Info) ComputeOutline(Corridor corridor, int baselineIndex, IReadOnlyList<Point3d>? valleyTips = null)
   {
     if (baselineIndex < 0 || baselineIndex >= corridor.Baselines.Count)
       throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", $"Corridor '{corridor.Name}' has no baseline {baselineIndex}.");
@@ -536,7 +542,8 @@ public static class CorridorSurfaceCommands
     if (left.Count < 2 || right.Count < 2)
       throw new JsonRpcDispatchException("CIVIL3D.INVALID_STATE", $"Baseline {baselineIndex} of '{corridor.Name}' has no built sections on both sides; rebuild the corridor first.");
 
-    var valleysSkipped = 0; var valleyEnds = 0;
+    var valleysSkipped = 0; var valleyEnds = 0; var tipsUsed = 0;
+    var tipTaken = new bool[valleyTips?.Count ?? 0];
     List<(double S, double X, double Y, double Z)> Chain(List<(double S, double X, double Y, double Z, bool Valley, double Off)> side)
     {
       var kept = new List<(double S, double X, double Y, double Z)>();
@@ -548,7 +555,17 @@ public static class CorridorSurfaceCommands
         // (the offsets grow along the valley towards the meet; "the end further from the run's middle" failed on runs of two)
         var pick = side[i];
         for (var k = i + 1; k <= j; k++) if (side[k].Off > pick.Off) pick = side[k];
-        kept.Add((pick.S, pick.X, pick.Y, pick.Z)); valleyEnds++;
+        // the valley's own tip, when one is given near this run: the sections end on the valley short of it
+        var tip = -1; var tipD = 25.0;
+        for (var t = 0; t < tipTaken.Length; t++)
+        {
+          if (tipTaken[t]) continue;
+          var d = Math.Sqrt((valleyTips![t].X - pick.X) * (valleyTips[t].X - pick.X) + (valleyTips[t].Y - pick.Y) * (valleyTips[t].Y - pick.Y));
+          if (d < tipD) { tipD = d; tip = t; }
+        }
+        if (tip >= 0) { tipTaken[tip] = true; tipsUsed++; kept.Add((pick.S, valleyTips![tip].X, valleyTips[tip].Y, valleyTips[tip].Z)); }
+        else kept.Add((pick.S, pick.X, pick.Y, pick.Z));
+        valleyEnds++;
         valleysSkipped += j - i;
         i = j + 1;
       }
@@ -597,7 +614,7 @@ public static class CorridorSurfaceCommands
     var info = new Dictionary<string, object?>
     {
       ["baselineIndex"] = baselineIndex, ["vertices"] = ring.Count, ["stationsLeft"] = left.Count, ["stationsRight"] = right.Count,
-      ["valleyPointsLeftOut"] = valleysSkipped, ["valleyEndsKept"] = valleyEnds,
+      ["valleyPointsLeftOut"] = valleysSkipped, ["valleyEndsKept"] = valleyEnds, ["valleyTipsUsed"] = valleyTips != null ? tipsUsed : null,
       ["note"] = "Static polygon from the built sections; add it again after a design change. Points coded Valley are inside the covered ground and are left out." + (corridor.Baselines.Count > 1 ? $" The corridor has {corridor.Baselines.Count} baselines; only baseline {baselineIndex} is outlined." : ""),
     };
     return (pts, info);

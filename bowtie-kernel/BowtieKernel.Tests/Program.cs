@@ -879,6 +879,39 @@ Test("check: feature-line runs break at stations without the code; the join alon
   True(BuiltCheck.SegmentPolyline(new P3(-1, 0, 0), new P3(1, 0, 0), v, 0.005).Count == 0, "at the line's own end: touching");
 });
 
+Test("surface: the valley as a breakline leaves out the drain and the run-on; boundary and area helpers", () =>
+{
+  // baseline along x (y = 0); drain edge at 1.05; valley from the bend point (0,0) out along y, then a 1.1 m level run-on
+  var bl = SampledBaseline.FromPolyline(new List<P2> { new(-20, 0), new(20, 0) });
+  double Clear(P2 p) => SurfaceLines.NearestOnBaseline(bl, p).Distance - 1.05;
+  var valley = new List<P3> { new(0, 0, 10), new(0, 0.9, 10), new(0, 4, 12), new(0, 8, 14), new(0, 9.1, 14) };
+  var parts = SurfaceLines.Trim(valley, 1.1, Clear);
+  True(parts.Count == 1, $"one part, got {parts.Count}");
+  Near(parts[0][0].Y, 1.05, 1e-3, "starts at the drain edge"); Near(parts[0][0].Z, 10 + 2 * (1.05 - 0.9) / 3.1, 1e-3, "level interpolated at the cut");
+  Near(parts[0][^1].Y, 8, 1e-9, "ends where the valley ends, not on the run-on");
+  True(parts[0].Count == 3, $"cut point + 2 vertices, got {parts[0].Count}");
+  // no recorded run-on: the level last segment is taken as it
+  Near(SurfaceLines.Trim(valley, null, Clear)[0][^1].Y, 8, 1e-9, "heuristic run-on");
+  // a valley that dips back inside the drain and out again gives two parts
+  var dip = new List<P3> { new(0, 2, 10), new(3, 0.5, 10), new(6, 2, 10), new(6, 3, 10.5) };
+  True(SurfaceLines.Trim(dip, 0, Clear).Count == 2, "in and out again: two parts");
+  // wholly inside: nothing
+  True(SurfaceLines.Trim(new List<P3> { new(0, 0, 0), new(0, 1, 0) }, 0, Clear).Count == 0, "inside the drain: nothing");
+
+  var (st, d) = SurfaceLines.NearestOnBaseline(bl, new P2(3, -2.5));
+  Near(st, 23, 1e-9, "station of the foot"); Near(d, 2.5, 1e-9, "distance");
+  var sq = new List<P2> { new(0, 0), new(10, 0), new(10, 5), new(0, 5) };
+  Near(SurfaceLines.PolygonArea(sq), 50, 1e-9, "area");
+  Near(SurfaceLines.RingDeviation(sq, sq.Select(p => new P2(p.X, p.Y + 0.2)).ToList()), 0.2, 1e-9, "ring shifted 0.2");
+  Near(SurfaceLines.RingDeviation(sq, new List<P2> { new(10, 0), new(10, 5), new(0, 5), new(0, 0) }), 0, 1e-9, "same ring, other start");
+  True(SurfaceLines.Samples(new List<P3> { new(0, 0, 0), new(1, 0, 0) }, 0.25).Count == 5, "samples every 0.25 m");
+  // the fingerprint that keeps an unchanged valley from being taken out and put back: same to the millimetre, else different
+  var f = SurfaceLines.Fingerprint(parts[0]);
+  True(f.Length == 16 && f == SurfaceLines.Fingerprint(parts[0].Select(p => new P3(p.X + 0.0002, p.Y, p.Z)).ToList()), "same to the mm: same fingerprint");
+  True(f != SurfaceLines.Fingerprint(parts[0].Select(p => new P3(p.X, p.Y, p.Z + 0.002)).ToList()), "2 mm higher: another fingerprint");
+  True(f != SurfaceLines.Fingerprint(parts[0].Take(2).ToList()), "a vertex less: another fingerprint");
+});
+
 Test("refresh: section compare - same design agrees, other slope / lane width / reach are found", () =>
 {
   SectionSample S(double lane, double slope, double reach, double start = 1.05) => new SectionSample

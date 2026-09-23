@@ -167,6 +167,8 @@ public static partial class CorridorBowtieCommands
     var ctxAfter = PluginRuntime.GetOptionalString(parameters, "splitAfter");
     var ctxFrequency = PluginRuntime.GetOptionalString(parameters, "parentFrequency");
     var inferParent = PluginRuntime.GetOptionalBool(parameters, "inferParent") ?? true;
+    // bowtie_fix's redo passes false: it puts the surfaces right itself once the bend is repaired again
+    var updateSurfaces = PluginRuntime.GetOptionalBool(parameters, "updateSurfaces") ?? true;
 
     Func<Autodesk.AutoCAD.ApplicationServices.Document, CivilDocument, Database, Transaction, object?> work = (doc, civilDoc, database, transaction) =>
     {
@@ -388,6 +390,11 @@ public static partial class CorridorBowtieCommands
       }
 
       var rebuildError = rebuild ? TryRebuild(corridor) : null;
+      // the erased valley's breakline comes out of the corridor surfaces (the surface closes over the bend as built now)
+      Dictionary<string, object?>? surfaces = null;
+      if (updateSurfaces && rebuild && rebuildError == null)
+        try { surfaces = UpdateValleySurfaces(transaction, corridor, baselineIndex, null, true, false, 0.005); }
+        catch (Exception ex) { warnings.Add($"The corridor surfaces were not updated ({ex.Message}): run bowtie_surface."); }
       return new Dictionary<string, object?>
       {
         ["corridorName"] = corridor.Name,
@@ -401,6 +408,7 @@ public static partial class CorridorBowtieCommands
         ["pieces"] = restoredPieces,
         ["rebuilt"] = rebuild && rebuildError == null,
         ["rebuildError"] = rebuildError,
+        ["surfaces"] = surfaces != null ? SurfaceSummary(surfaces) : null,
         ["regions"] = ListRegions(baseline, transaction),
         ["warnings"] = warnings,
       };
