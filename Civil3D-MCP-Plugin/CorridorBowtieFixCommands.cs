@@ -227,8 +227,13 @@ public static partial class CorridorBowtieCommands
       // A repair made before the fix context was recorded says nothing about where it came from. It was cut out of one
       // region: when the regions either side carry the same assembly and are not repairs themselves, that is the parent
       // (its assembly, name and frequency), and the three are merged back. Anything else is left split, with a warning.
+      // The same when the record names no regions to merge with (a repair cut, whole, out of a region that was itself an older
+      // repair - FL-03 BT-577 recorded the v0.3 region 'BT-346R', its v0.3 clip assembly, and nothing either side): the regions
+      // either side decide, as for a repair that recorded nothing.
       string? inferredFrom = null;
-      if (inferParent && ownPiece.Parent == null && ownPiece.ParentAssembly == null && ownPiece.Before == null && ownPiece.After == null)
+      var silent = ownPiece.Parent == null && ownPiece.ParentAssembly == null && ownPiece.Before == null && ownPiece.After == null;
+      var nothingToMerge = !silent && ownPiece.Before == null && ownPiece.After == null && pieces.Count <= 1;
+      if (inferParent && (silent || nothingToMerge))
       {
         var at = IndexOfName(baseline, region.Name);
         var all = baseline.BaselineRegions;
@@ -242,12 +247,22 @@ public static partial class CorridorBowtieCommands
         var nextAsm = next != null ? AssemblyName(transaction, SafeAssemblyId(next)) : null;
         if (prev != null && next != null && prevAsm != null && string.Equals(prevAsm, nextAsm, StringComparison.OrdinalIgnoreCase) && !IsRepair(prev) && !IsRepair(next))
         {
-          ownPiece = new UnfixPiece(region.Name, prev.Name, prevAsm, prev.Name, next.Name, FrequencySignature(prev));
           inferredFrom = $"neighbours '{prev.Name}' and '{next.Name}' (both {prevAsm})";
-          warnings.Add($"'{region.Name}' has no record of where it came from (a repair made before bowtie_fix recorded it): its parent is taken from the regions either side, {inferredFrom}.");
+          if (silent)
+          {
+            ownPiece = new UnfixPiece(region.Name, prev.Name, prevAsm, prev.Name, next.Name, FrequencySignature(prev));
+            warnings.Add($"'{region.Name}' has no record of where it came from (a repair made before bowtie_fix recorded it): its parent is taken from the regions either side, {inferredFrom}.");
+          }
+          else
+          {
+            warnings.Add($"'{region.Name}' records its parent as '{ownPiece.Parent ?? "none"}' ({ownPiece.ParentAssembly ?? "no assembly"}) but no regions to merge with (it was cut whole out of an older repair): it is merged with the regions either side, {inferredFrom}, and takes '{prev.Name}''s name{(ownPiece.Frequency == null ? " and frequency" : "")}.");
+            ownPiece = new UnfixPiece(region.Name, prev.Name, prevAsm, prev.Name, next.Name, ownPiece.Frequency ?? FrequencySignature(prev));
+          }
         }
-        else
+        else if (silent)
           warnings.Add($"'{region.Name}' has no record of where it came from, and the regions either side do not share one assembly ({prevAsm ?? "none"} / {nextAsm ?? "none"}): its assembly is kept and it is not merged.");
+        else
+          warnings.Add($"'{region.Name}' records no regions to merge with, and the regions either side do not share one assembly ({prevAsm ?? "none"} / {nextAsm ?? "none"}) or are repairs: it gets its recorded assembly back and is not merged.");
       }
       // a recorded parent assembly that is on neither region next to the piece is a stale record (e.g. a repair cut from a
       // region still on an older clip assembly): the assembly of the neighbours is given back instead, and said so
