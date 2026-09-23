@@ -4,6 +4,7 @@ using Autodesk.AutoCAD.Geometry;
 using Autodesk.Civil.ApplicationServices;
 using Autodesk.Civil.DatabaseServices;
 using CivilSurface = Autodesk.Civil.DatabaseServices.Surface;
+using K = Utnm.BowtieKernel;
 
 namespace Civil3DMcpPlugin;
 
@@ -1871,8 +1872,8 @@ public static partial class CorridorBowtieCommands
   private sealed class BuiltLink
   {
     public double Station;
-    public double Ax, Ay, Bx, By;
-    public double OuterOffset;
+    public double Ax, Ay, Az, Bx, By, Bz;
+    public double OffsetA, OffsetB, OuterOffset;
     public string Codes = "";
   }
 
@@ -1888,6 +1889,9 @@ public static partial class CorridorBowtieCommands
     var code = PluginRuntime.GetOptionalString(parameters, "code") ?? "Daylight";
     var maxListed = PluginRuntime.GetOptionalInt(parameters, "maxListed") ?? 25;
     var tolerance = PluginRuntime.GetOptionalDouble(parameters, "tolerance") ?? 0.005;
+    var valleyTolerance = PluginRuntime.GetOptionalDouble(parameters, "valleyTolerance") ?? 0.01;
+    var joinTolerance = PluginRuntime.GetOptionalDouble(parameters, "joinTolerance") ?? 0.05;
+    var minTurnDegrees = PluginRuntime.GetOptionalDouble(parameters, "minTurnDegrees") ?? 3.0;
     if (side is not ("left" or "right" or "both"))
       throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "side must be left, right or both.");
     if (tolerance < 0)
@@ -1904,153 +1908,388 @@ public static partial class CorridorBowtieCommands
         throw new JsonRpcDispatchException("CIVIL3D.INVALID_STATE", $"Corridor '{corridor.Name}' has no applied stations - rebuild it first.");
       var a = start ?? all[0];
       var b = end ?? all[^1];
-      var (report, totalCrossings, totalLoops, stationsRead) = CheckBuilt(baseline, all, a, b, side == "both" ? new[] { "left", "right" } : new[] { side }, linkCode, minOffset, code, maxListed, tolerance);
+      var check = CheckBuilt(baseline, transaction, all, a, b, side == "both" ? new[] { "left", "right" } : new[] { side }, linkCode, minOffset, code, maxListed, tolerance,
+        valleyTolerance, joinTolerance, minTurnDegrees);
       return new Dictionary<string, object?>
       {
         ["corridorName"] = corridor.Name,
         ["baselineIndex"] = baselineIndex,
         ["startStation"] = a,
         ["endStation"] = b,
-        ["stationsRead"] = stationsRead,
+        ["status"] = check.Status,
+        ["reasons"] = check.Reasons,
+        ["notes"] = check.Notes,
+        ["planCrossingsClear"] = check.PlanClear,
+        // kept for older callers: plan crossings and loops only - a clip that cuts every link to a stub is 'clean' too; read status
+        ["clean"] = check.PlanClear,
+        ["stationsRead"] = check.StationsRead,
         ["linkCode"] = linkCode,
         ["minOffset"] = minOffset,
-        ["clean"] = totalCrossings == 0 && totalLoops == 0,
-        ["sides"] = report,
+        ["sides"] = check.Report,
         ["tolerance"] = tolerance,
-        ["method"] = "Built sections only: every pair of links from different applied stations is tested for a plan crossing more than `tolerance` from the link ends; the feature line is the outermost point with the code at each applied station, joined by straight chords.",
+        ["valleyTolerance"] = valleyTolerance,
+        ["joinTolerance"] = joinTolerance,
+        ["method"] = "Built sections only. Plan crossings: every pair of links from different applied stations, more than `tolerance` from the link ends. " +
+          "Feature line: the outermost point with the code at each applied station, joined by straight chords only between consecutive stations that both carry it. " +
+          "Repairs (valley lines written by bowtie_seam on ClipTarget): each Valley end on the valley line within `valleyTolerance` (level too where ClipElev is mapped), " +
+          "and no section crossing the valley line beyond the drain; how closely the surface follows the valley between neighbouring Valley ends (chords sampled every 0.1 m) is reported, with a note beyond `joinTolerance`. " +
+          "Bends not repaired (turning at least minTurnDegrees): an applied station of each leg within reach x tan(turn/2) of an angle point, or two on a curve whose radius the inside reach exceeds - otherwise a bowtie there cannot show. " +
+          "status: verified | invalid_candidate | unsupported (clip targets not written by bowtie_seam: plan crossings only there) | insufficient_data.",
       };
     });
   }
 
-  /// <summary>Link crossings and feature-line loops in the built corridor between two stations (bowtie_check's test).</summary>
-  private static (List<Dictionary<string, object?>> Report, int Crossings, int Loops, int StationsRead) CheckBuilt(Baseline baseline, double[] all,
-    double a, double b, string[] sides, string linkCode, double minOffset, string code, int maxListed, double tolerance)
+  /// <summary>What bowtie_check found: the report per side, the plan-crossing totals (the old test) and the verdict.</summary>
+  private sealed class BuiltCheckResult
   {
-      var stations = all.Where(s => s >= a - StationTolerance && s <= b + StationTolerance).ToArray();
+    public List<Dictionary<string, object?>> Report = new();
+    public int Crossings, Loops, StationsRead, Unreadable;
+    /// <summary>verified | invalid_candidate | unsupported | insufficient_data</summary>
+    public string Status = "verified";
+    public List<string> Reasons = new();
+    /// <summary>Things worth knowing that do not change the verdict (a coarse join along a valley).</summary>
+    public List<string> Notes = new();
+    public bool PlanClear => Crossings == 0 && Loops == 0;
+  }
 
-      var links = sides.ToDictionary(sd => sd, _ => new List<BuiltLink>());
-      var codePts = sides.ToDictionary(sd => sd, _ => new List<(double S, double X, double Y, double Tx, double Ty)>());
-      var valleyCount = sides.ToDictionary(sd => sd, _ => 0);
-      var unreadable = 0;
+  private static int StatusRank(string status) => status switch { "invalid_candidate" => 3, "unsupported" => 2, "insufficient_data" => 1, _ => 0 };
 
-      foreach (var s in stations)
-      {
-        AppliedAssembly applied;
-        try { applied = baseline.GetAppliedAssemblyAtStation(s); }
-        catch { unreadable++; continue; }
-        double tx = 0, ty = 0;
-        try { var d = baseline.GetDirectionAtStation(s); var l = Math.Sqrt(d.X * d.X + d.Y * d.Y); if (l > 1e-12) { tx = d.X / l; ty = d.Y / l; } } catch { }
+  /// <summary>
+  /// bowtie_check's test on the built corridor between two stations. Plan crossings between links of different stations and
+  /// loops in the feature line of 'code' only ever falsify a repair (a clip that cuts every link back to a stub scores zero),
+  /// so the verdict also needs positive evidence:
+  /// - the feature line is joined only between consecutive stations that both carry the code (a station without it breaks
+  ///   the line, as in Civil 3D); stations that end on neither the code nor a Valley point are missing evidence;
+  /// - every repair (a valley line written by bowtie_seam, mapped on ClipTarget): each section of its region that ends in
+  ///   Valley ends ON the valley line (plan, and level where ClipElev is mapped); no section crosses the valley line on its
+  ///   way out (beyond the drain); how closely the surface follows the valley between neighbouring ends is measured (a note);
+  /// - every bend that is not repaired: the applied stations are dense enough for a bowtie there to show at all.
+  /// Status: invalid_candidate (something is wrong), unsupported (a clip target not written by bowtie_seam: plan crossings
+  /// only), insufficient_data (a section unreadable, an end missing, a bend too sparsely sampled), verified.
+  /// </summary>
+  private static BuiltCheckResult CheckBuilt(Baseline baseline, Transaction transaction, double[] all,
+    double a, double b, string[] sides, string linkCode, double minOffset, string code, int maxListed, double tolerance,
+    double valleyTolerance = 0.01, double joinTolerance = 0.05, double minTurnDegrees = 3.0)
+  {
+    var result = new BuiltCheckResult();
+    var stations = all.Where(s => s >= a - StationTolerance && s <= b + StationTolerance).ToArray();
 
-        foreach (var sd in sides)
-        {
-          var sign = sd == "left" ? -1.0 : 1.0;
-          foreach (CalculatedLink link in applied.Links)
-          {
-            if (!string.IsNullOrWhiteSpace(linkCode) && !HasCode(link.CorridorCodes, linkCode)) continue;
-            var pts = link.CalculatedPoints.Cast<CalculatedPoint>().ToList();
-            if (pts.Count < 2) continue;
-            var o0 = sign * pts[0].StationOffsetElevationToBaseline.Y;
-            var o1 = sign * pts[^1].StationOffsetElevationToBaseline.Y;
-            if (o0 < -1e-6 || o1 < -1e-6) continue;
-            if (Math.Max(o0, o1) <= minOffset + 1e-9) continue;
-            var p0 = pts[0].XYZ; var p1 = pts[^1].XYZ;
-            if (Math.Abs(p0.X - p1.X) < 1e-9 && Math.Abs(p0.Y - p1.Y) < 1e-9) continue;
-            links[sd].Add(new BuiltLink
-            {
-              Station = s, Ax = p0.X, Ay = p0.Y, Bx = p1.X, By = p1.Y, OuterOffset = Math.Max(o0, o1),
-              Codes = string.Join(",", ReadCodes(link.CorridorCodes)),
-            });
-          }
-          CalculatedPoint? best = null;
-          var bestOff = double.NegativeInfinity;
-          foreach (CalculatedPoint p in applied.Points)
-          {
-            var o = sign * p.StationOffsetElevationToBaseline.Y;
-            if (o <= 1e-9) continue;
-            if (HasCode(p.CorridorCodes, "Valley")) valleyCount[sd]++;
-            if (HasCode(p.CorridorCodes, code) && o > bestOff) { best = p; bestOff = o; }
-          }
-          if (best != null) codePts[sd].Add((s, best.XYZ.X, best.XYZ.Y, tx, ty));
-        }
-      }
+    var links = sides.ToDictionary(sd => sd, _ => new List<BuiltLink>());
+    var codePts = sides.ToDictionary(sd => sd, _ => new List<(double S, double X, double Y, double Tx, double Ty)>());
+    var valleyCount = sides.ToDictionary(sd => sd, _ => 0);
+    // per side and station: has the code point, has a Valley point (the outermost, with its offset)
+    var ends = sides.ToDictionary(sd => sd, _ => new List<(double S, bool Code, K.P3? Valley, double ValleyOffset)>());
+    var unreadableAt = new List<double>();
 
-      var report = new List<Dictionary<string, object?>>();
-      var totalCrossings = 0;
-      var totalLoops = 0;
+    foreach (var s in stations)
+    {
+      AppliedAssembly applied;
+      try { applied = baseline.GetAppliedAssemblyAtStation(s); }
+      catch { unreadableAt.Add(s); continue; }
+      double tx = 0, ty = 0;
+      try { var d = baseline.GetDirectionAtStation(s); var l = Math.Sqrt(d.X * d.X + d.Y * d.Y); if (l > 1e-12) { tx = d.X / l; ty = d.Y / l; } } catch { }
+
       foreach (var sd in sides)
       {
-        var list = links[sd];
-        var crossings = new List<Dictionary<string, object?>>();
-        var pairs = new HashSet<(double, double)>();
-        var count = 0;
-        for (var i = 0; i < list.Count; i++)
+        var sign = sd == "left" ? -1.0 : 1.0;
+        foreach (CalculatedLink link in applied.Links)
         {
-          var p = list[i];
-          var pminx = Math.Min(p.Ax, p.Bx); var pmaxx = Math.Max(p.Ax, p.Bx);
-          var pminy = Math.Min(p.Ay, p.By); var pmaxy = Math.Max(p.Ay, p.By);
-          for (var j = i + 1; j < list.Count; j++)
+          if (!string.IsNullOrWhiteSpace(linkCode) && !HasCode(link.CorridorCodes, linkCode)) continue;
+          var pts = link.CalculatedPoints.Cast<CalculatedPoint>().ToList();
+          if (pts.Count < 2) continue;
+          var o0 = sign * pts[0].StationOffsetElevationToBaseline.Y;
+          var o1 = sign * pts[^1].StationOffsetElevationToBaseline.Y;
+          if (o0 < -1e-6 || o1 < -1e-6) continue;
+          if (Math.Max(o0, o1) <= minOffset + 1e-9) continue;
+          var p0 = pts[0].XYZ; var p1 = pts[^1].XYZ;
+          if (Math.Abs(p0.X - p1.X) < 1e-9 && Math.Abs(p0.Y - p1.Y) < 1e-9) continue;
+          links[sd].Add(new BuiltLink
           {
-            var q = list[j];
-            if (Math.Abs(q.Station - p.Station) < StationTolerance) continue;
-            if (Math.Max(q.Ax, q.Bx) < pminx || Math.Min(q.Ax, q.Bx) > pmaxx || Math.Max(q.Ay, q.By) < pminy || Math.Min(q.Ay, q.By) > pmaxy) continue;
-            if (!ProperCross(p.Ax, p.Ay, p.Bx, p.By, q.Ax, q.Ay, q.Bx, q.By, tolerance, out var x, out var y)) continue;
-            count++;
-            pairs.Add((Math.Min(p.Station, q.Station), Math.Max(p.Station, q.Station)));
-            if (crossings.Count < maxListed)
-              crossings.Add(new Dictionary<string, object?>
-              {
-                ["stations"] = new[] { p.Station, q.Station },
-                ["linkCodes"] = new[] { p.Codes, q.Codes },
-                ["x"] = Math.Round(x, 4), ["y"] = Math.Round(y, 4),
-              });
-          }
+            Station = s, Ax = p0.X, Ay = p0.Y, Az = p0.Z, Bx = p1.X, By = p1.Y, Bz = p1.Z, OffsetA = o0, OffsetB = o1, OuterOffset = Math.Max(o0, o1),
+            Codes = string.Join(",", ReadCodes(link.CorridorCodes)),
+          });
         }
-
-        // built feature line of `code`
-        var fl = codePts[sd];
-        var selfCross = 0;
-        var loops = new List<Dictionary<string, object?>>();
-        for (var i = 0; i + 1 < fl.Count; i++)
+        CalculatedPoint? best = null, valley = null;
+        double bestOff = double.NegativeInfinity, valleyOff = double.NegativeInfinity;
+        foreach (CalculatedPoint p in applied.Points)
         {
-          for (var j = i + 2; j + 1 < fl.Count; j++)
+          var o = sign * p.StationOffsetElevationToBaseline.Y;
+          if (o <= 1e-9) continue;
+          if (HasCode(p.CorridorCodes, "Valley")) { valleyCount[sd]++; if (o > valleyOff) { valley = p; valleyOff = o; } }
+          if (HasCode(p.CorridorCodes, code) && o > bestOff) { best = p; bestOff = o; }
+        }
+        if (best != null) codePts[sd].Add((s, best.XYZ.X, best.XYZ.Y, tx, ty));
+        ends[sd].Add((s, best != null, valley != null ? new K.P3(valley.XYZ.X, valley.XYZ.Y, valley.XYZ.Z) : null, valleyOff));
+      }
+    }
+    result.Unreadable = unreadableAt.Count;
+    result.StationsRead = stations.Length - unreadableAt.Count;
+    if (unreadableAt.Count > 0)
+      result.Reasons.Add($"{unreadableAt.Count} applied station(s) could not be read ({string.Join(", ", unreadableAt.Take(maxListed).Select(x => x.ToString("0.###")))}): rebuild the corridor.");
+
+    // the repairs on this baseline, and clip targets the check cannot evaluate
+    var legacy = new List<string>(); var foreign = new List<string>();
+    List<SeamGroup> groups;
+    try { groups = CollectSeamGroups(baseline, transaction, legacy, foreign); }
+    catch (Exception ex) { groups = new List<SeamGroup>(); result.Reasons.Add($"The repairs on the baseline could not be read ({ex.Message})."); }
+    groups = groups.Where(g => g.To >= a - StationTolerance && g.From <= b + StationTolerance).ToList();
+    bool RegionInRange(string entry)
+    {
+      var name = entry.Split(':')[0].Trim();
+      var ri = IndexOfName(baseline, name);
+      if (ri < 0) return true;
+      var r = baseline.BaselineRegions[ri];
+      return r.EndStation >= a - StationTolerance && r.StartStation <= b + StationTolerance;
+    }
+    legacy = legacy.Where(RegionInRange).ToList(); foreign = foreign.Where(RegionInRange).ToList();
+
+    // bends, for the sampling check
+    List<(K.Bend Bend, double Pi, bool Corner)> bends = new();
+    var bendsUnread = false;
+    try
+    {
+      var samples = SampleBaselineForSeam(baseline, Math.Max(baseline.StartStation, a), Math.Min(baseline.EndStation, b));
+      foreach (var bend in K.BendFinder.Find(samples, Math.Max(baseline.StartStation, a), Math.Min(baseline.EndStation, b), minTurnDegrees))
+      {
+        var corner = samples.Corners.Where(c => c.Station >= bend.From - 0.2 && c.Station <= bend.To + 0.2).OrderByDescending(c => Math.Abs(c.Jump)).FirstOrDefault();
+        var isCorner = corner.Jump != 0 && Math.Abs(corner.Jump) >= 0.5 * Math.Abs(bend.TurnDegrees * Math.PI / 180);
+        bends.Add((bend, isCorner ? corner.Station : 0.5 * (bend.From + bend.To), isCorner));
+      }
+    }
+    catch (Exception ex) { bendsUnread = true; result.Reasons.Add($"The bends of the baseline could not be read ({ex.Message}): the station spacing at bends was not checked."); }
+
+    string Worst(string x, string y) => StatusRank(y) > StatusRank(x) ? y : x;
+    var overall = unreadableAt.Count > 0 || bendsUnread ? "insufficient_data" : "verified";
+
+    foreach (var sd in sides)
+    {
+      var sideStatus = "verified";
+      var sideReasons = new List<string>();
+      var sideNotes = new List<string>();
+      void Flag(string status, string reason) { sideStatus = Worst(sideStatus, status); sideReasons.Add(reason); }
+
+      // ---- plan crossings between links of different stations (the old test)
+      var list = links[sd];
+      var crossings = new List<Dictionary<string, object?>>();
+      var pairs = new HashSet<(double, double)>();
+      var count = 0;
+      for (var i = 0; i < list.Count; i++)
+      {
+        var p = list[i];
+        var pminx = Math.Min(p.Ax, p.Bx); var pmaxx = Math.Max(p.Ax, p.Bx);
+        var pminy = Math.Min(p.Ay, p.By); var pmaxy = Math.Max(p.Ay, p.By);
+        for (var j = i + 1; j < list.Count; j++)
+        {
+          var q = list[j];
+          if (Math.Abs(q.Station - p.Station) < StationTolerance) continue;
+          if (Math.Max(q.Ax, q.Bx) < pminx || Math.Min(q.Ax, q.Bx) > pmaxx || Math.Max(q.Ay, q.By) < pminy || Math.Min(q.Ay, q.By) > pmaxy) continue;
+          if (!ProperCross(p.Ax, p.Ay, p.Bx, p.By, q.Ax, q.Ay, q.Bx, q.By, tolerance, out var x, out var y)) continue;
+          count++;
+          pairs.Add((Math.Min(p.Station, q.Station), Math.Max(p.Station, q.Station)));
+          if (crossings.Count < maxListed)
+            crossings.Add(new Dictionary<string, object?> { ["stations"] = new[] { p.Station, q.Station }, ["linkCodes"] = new[] { p.Codes, q.Codes }, ["x"] = Math.Round(x, 4), ["y"] = Math.Round(y, 4) });
+        }
+      }
+      if (count > 0) Flag("invalid_candidate", $"{count} link crossing(s) between sections of different stations.");
+
+      // ---- the feature line of `code`, joined only between consecutive stations that both carry it
+      var fl = codePts[sd];
+      var endRows = ends[sd];
+      var runs = K.BuiltCheck.Runs(endRows.Select(e => e.Code).ToList());
+      var byStation = fl.ToDictionary(x => x.S, x => x);
+      var selfCross = 0;
+      var loops = new List<Dictionary<string, object?>>();
+      var backward = new List<double>();
+      foreach (var (r0, r1) in runs)
+      {
+        var run = Enumerable.Range(r0, r1 - r0 + 1).Select(k => byStation[endRows[k].S]).ToList();
+        for (var i = 0; i + 1 < run.Count; i++)
+        {
+          for (var j = i + 2; j + 1 < run.Count; j++)
           {
-            if (fl[j].S - fl[i + 1].S > 200) break;
-            if (!ProperCross(fl[i].X, fl[i].Y, fl[i + 1].X, fl[i + 1].Y, fl[j].X, fl[j].Y, fl[j + 1].X, fl[j + 1].Y, tolerance, out var x, out var y)) continue;
+            if (run[j].S - run[i + 1].S > 200) break;
+            if (!ProperCross(run[i].X, run[i].Y, run[i + 1].X, run[i + 1].Y, run[j].X, run[j].Y, run[j + 1].X, run[j + 1].Y, tolerance, out var x, out var y)) continue;
             selfCross++;
             if (loops.Count < maxListed)
-              loops.Add(new Dictionary<string, object?> { ["fromStation"] = fl[i].S, ["toStation"] = fl[j + 1].S, ["x"] = Math.Round(x, 4), ["y"] = Math.Round(y, 4) });
+              loops.Add(new Dictionary<string, object?> { ["fromStation"] = run[i].S, ["toStation"] = run[j + 1].S, ["x"] = Math.Round(x, 4), ["y"] = Math.Round(y, 4) });
           }
-        }
-        var backward = new List<double>();
-        for (var i = 0; i + 1 < fl.Count; i++)
-        {
-          var dx = fl[i + 1].X - fl[i].X; var dy = fl[i + 1].Y - fl[i].Y;
+          var dx = run[i + 1].X - run[i].X; var dy = run[i + 1].Y - run[i].Y;
           if (Math.Sqrt(dx * dx + dy * dy) <= Math.Max(tolerance, 1e-6)) continue;
-          if (dx * fl[i].Tx + dy * fl[i].Ty < -1e-6) backward.Add(fl[i].S);
+          if (dx * run[i].Tx + dy * run[i].Ty < -1e-6) backward.Add(run[i].S);
         }
-        totalCrossings += count;
-        totalLoops += selfCross;
-        report.Add(new Dictionary<string, object?>
+      }
+      if (selfCross > 0) Flag("invalid_candidate", $"The {code} line crosses itself {selfCross} time(s).");
+      if (backward.Count > 0) Flag("invalid_candidate", $"The {code} line runs backwards at {backward.Count} station(s) ({string.Join(", ", backward.Take(5).Select(x => x.ToString("0.###")))}).");
+      var atValley = endRows.Where(e => !e.Code && e.Valley.HasValue).Select(e => e.S).ToList();
+      var missing = endRows.Where(e => !e.Code && !e.Valley.HasValue).Select(e => e.S).ToList();
+      if (missing.Count > 0)
+        Flag("insufficient_data", $"{missing.Count} station(s) end on neither {code} nor a Valley point ({string.Join(", ", missing.Take(8).Select(x => x.ToString("0.###")))}): nothing shows where their inside ends.");
+
+      // ---- the repairs on this side
+      var repairs = new List<Dictionary<string, object?>>();
+      foreach (var g in groups.Where(g => g.Side == sd))
+      {
+        var row = new Dictionary<string, object?> { ["regions"] = g.Pieces, ["valleyLine"] = g.SeamName, ["from"] = Math.Round(g.From, 3), ["to"] = Math.Round(g.To, 3), ["levelFromTarget"] = g.LevelFromTarget };
+        var lines = new List<IReadOnlyList<K.P3>>();
+        try
         {
-          ["side"] = sd,
-          ["linksChecked"] = list.Count,
-          ["linkCrossings"] = count,
-          ["stationPairsCrossing"] = pairs.Count,
-          ["crossings"] = crossings,
-          ["featureLine"] = new Dictionary<string, object?>
-          {
-            ["code"] = code,
-            ["points"] = fl.Count,
-            ["selfCrossings"] = selfCross,
-            ["backwardSteps"] = backward.Count,
-            ["backwardAtStations"] = backward.Take(maxListed).ToList(),
-            ["loops"] = loops,
-          },
-          ["valleyPoints"] = valleyCount[sd],
-        });
+          lines.Add(FeatureLinePoints(transaction, g.SeamId).Select(P).ToList());
+          if (g.CapId.HasValue) lines.Add(FeatureLinePoints(transaction, g.CapId.Value).Select(P).ToList());
+        }
+        catch (Exception ex) { row["result"] = $"valley line not readable ({ex.Message})"; Flag("insufficient_data", $"Repair '{g.SeamName}': valley line not readable."); repairs.Add(row); continue; }
+        lines = lines.Where(l => l.Count >= 2).ToList();
+        if (lines.Count == 0) { row["result"] = "valley line has no length"; Flag("insufficient_data", $"Repair '{g.SeamName}': valley line has no length."); repairs.Add(row); continue; }
+
+        var inRegion = endRows.Where(e => e.S >= g.From - StationTolerance && e.S <= g.To + StationTolerance).ToList();
+        var onValley = inRegion.Where(e => e.Valley.HasValue).ToList();
+        row["stations"] = inRegion.Count;
+        row["endOnValley"] = onValley.Count;
+        row["endOnDaylight"] = inRegion.Count(e => e.Code && !e.Valley.HasValue);
+        row["noEnd"] = inRegion.Count(e => !e.Code && !e.Valley.HasValue);
+        var problems = new List<string>();
+        var whole = g.From >= a - StationTolerance && g.To <= b + StationTolerance;
+        if (!whole) row["partlyInRange"] = true;
+        if (onValley.Count == 0 && whole) problems.Add("no section of the region ends on the valley: the clip never fired");
+
+        // each Valley end on the valley line
+        var offPlan = new List<Dictionary<string, object?>>(); var offLevel = new List<Dictionary<string, object?>>();
+        double worstPlan = 0, worstLevel = 0;
+        foreach (var e in onValley)
+        {
+          var (d, z) = K.BuiltCheck.Nearest(lines, e.Valley!.Value);
+          var dz = double.IsNaN(z) ? 0 : Math.Abs(e.Valley.Value.Z - z);
+          worstPlan = Math.Max(worstPlan, d); worstLevel = Math.Max(worstLevel, dz);
+          if (d > valleyTolerance) offPlan.Add(new Dictionary<string, object?> { ["station"] = e.S, ["offset"] = Math.Round(e.ValleyOffset, 3), ["planDistance"] = Math.Round(d, 4) });
+          else if (dz > valleyTolerance) offLevel.Add(new Dictionary<string, object?> { ["station"] = e.S, ["offset"] = Math.Round(e.ValleyOffset, 3), ["levelDifference"] = Math.Round(e.Valley.Value.Z - z, 4) });
+        }
+        row["valleyEnds"] = new Dictionary<string, object?>
+        {
+          ["worstPlanDistance"] = Math.Round(worstPlan, 4), ["worstLevelDifference"] = Math.Round(worstLevel, 4),
+          ["offLine"] = offPlan.Take(maxListed).ToList(), ["offLevel"] = offLevel.Take(maxListed).ToList(),
+        };
+        if (offPlan.Count > 0) problems.Add($"{offPlan.Count} section(s) end in Valley but off the valley line (up to {offPlan.Max(x => (double)x["planDistance"]!):0.###} m)");
+        if (offLevel.Count > 0)
+        {
+          if (g.LevelFromTarget) problems.Add($"{offLevel.Count} section(s) end on the valley line off its level (up to {worstLevel:0.###} m) although ClipElev is mapped");
+          else row["levelNote"] = $"ClipElev not mapped: the two sides meet the valley on their own slopes, up to {worstLevel:0.###} m apart in level (the seam's closure).";
+        }
+
+        // no section crosses the valley line on its way out (inside the drain the legs' own parts overlap at the corner:
+        // the junction's business, not the valley's - so only beyond where the valley ends start)
+        var drainEdge = onValley.Count > 0 ? onValley.Min(e => e.ValleyOffset) - valleyTolerance : 0.0;
+        var crossers = new List<Dictionary<string, object?>>();
+        var crossStations = new HashSet<double>();
+        var lx0 = lines.SelectMany(l => l).Min(q => q.X); var lx1 = lines.SelectMany(l => l).Max(q => q.X);
+        var ly0 = lines.SelectMany(l => l).Min(q => q.Y); var ly1 = lines.SelectMany(l => l).Max(q => q.Y);
+        foreach (var lk in list)
+        {
+          if (Math.Max(lk.Ax, lk.Bx) < lx0 || Math.Min(lk.Ax, lk.Bx) > lx1 || Math.Max(lk.Ay, lk.By) < ly0 || Math.Min(lk.Ay, lk.By) > ly1) continue;
+          foreach (var line in lines)
+            foreach (var t in K.BuiltCheck.SegmentPolyline(new K.P3(lk.Ax, lk.Ay, lk.Az), new K.P3(lk.Bx, lk.By, lk.Bz), line, tolerance))
+            {
+              var off = lk.OffsetA + (lk.OffsetB - lk.OffsetA) * t;
+              if (off <= drainEdge) continue;
+              if (crossStations.Add(lk.Station) && crossers.Count < maxListed)
+                crossers.Add(new Dictionary<string, object?> { ["station"] = lk.Station, ["offset"] = Math.Round(off, 3), ["link"] = lk.Codes });
+            }
+        }
+        row["crossValley"] = crossers;
+        if (crossStations.Count > 0) problems.Add($"{crossStations.Count} section(s) cross the valley line instead of ending on it ({string.Join(", ", crossStations.OrderBy(x => x).Take(6).Select(x => x.ToString("0.###")))})");
+
+        // continuity: how closely the built surface follows the valley between the points where sections end on it. Both legs'
+        // ends lie along the one line; the surface between neighbouring ends is a straight chord that cuts across wherever the
+        // valley bends in between. Not a fault of the repair but of the station spacing: reported, and a note when it is coarse.
+        var ordered = K.BuiltCheck.OrderAlong(onValley.Select(e => e.Valley!.Value).ToList(), lines);
+        var chain = ordered.Select(k => (onValley[k].S, onValley[k].Valley!.Value)).ToList();
+        var gap = K.BuiltCheck.ChainDeviation(chain, lines);
+        row["join"] = new Dictionary<string, object?>
+        {
+          ["valleyEnds"] = chain.Count, ["longestChord"] = Math.Round(gap.LongestChord, 3),
+          ["worstPlan"] = Math.Round(gap.Plan, 4), ["worstLevel"] = Math.Round(gap.Level, 4),
+          ["between"] = gap.BetweenA.HasValue ? new[] { Math.Round(gap.BetweenA.Value, 3), Math.Round(gap.BetweenB!.Value, 3) } : null,
+        };
+        if (gap.Plan > joinTolerance || gap.Level > joinTolerance)
+          sideNotes.Add($"Repair '{g.SeamName}': between the valley ends at {gap.BetweenA:0.###} and {gap.BetweenB:0.###} the built surface leaves the valley line by up to {gap.Plan:0.###} m in plan / {gap.Level:0.###} m in level (valley ends up to {gap.LongestChord:0.#} m apart along it): add stations there if that matters.");
+
+        row["result"] = problems.Count == 0 ? "verified" : string.Join("; ", problems);
+        if (problems.Count > 0) Flag("invalid_candidate", $"Repair '{g.SeamName}': {string.Join("; ", problems)}.");
+        repairs.Add(row);
       }
 
-      return (report, totalCrossings, totalLoops, stations.Length - unreadable);
+      // ---- bends not repaired on this side: are the stations dense enough to show a bowtie at all?
+      var sideStations = endRows.Select(e => e.S).ToList();
+      var bendRows = new List<Dictionary<string, object?>>();
+      foreach (var (bend, pi, isCorner) in bends)
+      {
+        if ((bend.Side == K.Side.Left ? "left" : "right") != sd) continue;
+        var bendRow = new Dictionary<string, object?>
+        {
+          ["station"] = Math.Round(pi, 3), ["type"] = isCorner ? "angle_point" : "curve", ["turnDegrees"] = Math.Round(Math.Abs(bend.TurnDegrees), 3),
+        };
+        var repair = groups.FirstOrDefault(g => g.Side == sd && pi >= g.From - StationTolerance && pi <= g.To + StationTolerance);
+        if (repair != null) { bendRow["result"] = "repaired"; bendRow["valleyLine"] = repair.SeamName; bendRows.Add(bendRow); continue; }
+        var near = list.Where(l => Math.Abs(l.Station - pi) <= 20).ToList();
+        var reach = near.Count > 0 ? near.Max(l => l.OuterOffset) : 0.0;
+        var turn = Math.Abs(bend.TurnDegrees) * Math.PI / 180;
+        var cov = isCorner ? K.BuiltCheck.AngleCoverage(pi, reach, turn, sideStations) : K.BuiltCheck.CurveCoverage(bend.From, bend.To, reach, turn, sideStations);
+        bendRow["insideReach"] = Math.Round(reach, 3);
+        bendRow["overlapHalfLength"] = Math.Round(cov.HalfLength, 3);
+        if (cov.Radius.HasValue) bendRow["radius"] = Math.Round(cov.Radius.Value, 3);
+        if (cov.Covered) bendRow["result"] = isCorner || cov.HalfLength > 0 ? "sampled" : "no_overlap_possible";
+        else
+        {
+          var gapText = isCorner
+            ? $"no applied station of {(cov.StationBefore == null ? "the incoming leg" : "the outgoing leg")} within {cov.HalfLength:0.###} m of the bend (nearest {cov.NearestBefore:0.###} / {cov.NearestAfter:0.###})"
+            : "fewer than two applied stations on the curve while the inside reaches past its radius";
+          bendRow["result"] = "not_sampled";
+          bendRow["why"] = gapText;
+          Flag("insufficient_data", $"Bend at {pi:0.###} ({Math.Abs(bend.TurnDegrees):0.#} deg, {sd}): {gapText} - a bowtie there cannot show in the built corridor. Isolate it at 1 m or repair it with bowtie_fix.");
+        }
+        bendRows.Add(bendRow);
+      }
+
+      result.Crossings += count;
+      result.Loops += selfCross;
+      overall = Worst(overall, sideStatus);
+      result.Reasons.AddRange(sideReasons.Select(r => $"{sd}: {r}"));
+      result.Report.Add(new Dictionary<string, object?>
+      {
+        ["side"] = sd,
+        ["status"] = sideStatus,
+        ["planCrossingsClear"] = count == 0 && selfCross == 0,
+        ["linksChecked"] = list.Count,
+        ["linkCrossings"] = count,
+        ["stationPairsCrossing"] = pairs.Count,
+        ["crossings"] = crossings,
+        ["featureLine"] = new Dictionary<string, object?>
+        {
+          ["code"] = code,
+          ["points"] = fl.Count,
+          ["runs"] = runs.Count,
+          ["stationsEndingInValley"] = atValley.Count,
+          ["stationsWithoutEnd"] = missing.Take(maxListed).ToList(),
+          ["selfCrossings"] = selfCross,
+          ["backwardSteps"] = backward.Count,
+          ["backwardAtStations"] = backward.Take(maxListed).ToList(),
+          ["loops"] = loops,
+        },
+        ["valleyPoints"] = valleyCount[sd],
+        ["repairs"] = repairs,
+        ["bends"] = bendRows,
+        ["reasons"] = sideReasons,
+        ["notes"] = sideNotes,
+      });
+      result.Notes.AddRange(sideNotes.Select(n => $"{sd}: {n}"));
+    }
+    // clip targets the check cannot evaluate: plan crossings only there
+    var cannot = legacy.Select(x => $"{x} (alignment valley from the older method)").Concat(foreign.Select(x => $"{x} (not written by bowtie_seam)")).ToList();
+    if (cannot.Count > 0)
+    {
+      overall = Worst(overall, "unsupported");
+      result.Reasons.Add($"Clip target(s) the check cannot evaluate, plan crossings only there: {string.Join("; ", cannot.Take(maxListed))}.");
+    }
+    result.Status = overall;
+    return result;
   }
 
   private static IEnumerable<string> ReadCodes(CorridorCodeCollection? codes)

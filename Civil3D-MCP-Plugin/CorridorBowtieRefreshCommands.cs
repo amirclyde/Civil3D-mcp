@@ -134,12 +134,17 @@ public static partial class CorridorBowtieCommands
       double[] Stations() { try { return baseline.SortedStations() ?? Array.Empty<double>(); } catch { return Array.Empty<double>(); } }
       Dictionary<string, object?> Check(SeamGroup g)
       {
-        var (report, crossings, loops, read) = CheckBuilt(baseline, Stations(), g.From - 5, g.To + 5, new[] { g.Side }, g.Record.GetValueOrDefault("linkCode") is { Length: > 0 } lc ? lc : "Top", 0, "Daylight", 10, checkTolerance);
-        var sideRow = report.FirstOrDefault();
+        var c = CheckBuilt(baseline, transaction, Stations(), g.From - 5, g.To + 5, new[] { g.Side }, g.Record.GetValueOrDefault("linkCode") is { Length: > 0 } lc ? lc : "Top", 0, "Daylight", 10, checkTolerance);
+        var sideRow = c.Report.FirstOrDefault();
+        // this repair's own evidence decides (another repair or bend in the range reports on its own)
+        var own = (sideRow?["repairs"] as List<Dictionary<string, object?>>)?.FirstOrDefault(r => Equals(r["valleyLine"], g.SeamName));
+        var ownOk = own == null || Equals(own["result"], "verified");
         return new Dictionary<string, object?>
         {
-          ["clean"] = crossings == 0 && loops == 0, ["linkCrossings"] = crossings, ["loops"] = loops, ["stationsRead"] = read,
+          ["clean"] = c.PlanClear && ownOk, ["linkCrossings"] = c.Crossings, ["loops"] = c.Loops, ["stationsRead"] = c.StationsRead,
           ["valleyPoints"] = sideRow?["valleyPoints"], ["from"] = Math.Round(g.From - 5, 3), ["to"] = Math.Round(g.To + 5, 3),
+          ["status"] = c.Status, ["repair"] = own?["result"], ["join"] = own?["join"],
+          ["reasons"] = c.Reasons.Count > 0 ? c.Reasons : null,
         };
       }
 

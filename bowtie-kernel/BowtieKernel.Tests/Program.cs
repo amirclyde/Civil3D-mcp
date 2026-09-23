@@ -823,6 +823,51 @@ Test("refresh: the level run-on past the valley's end is not compared; meet stat
   True(double.IsPositiveInfinity(Refresh.StationShift(Array.Empty<double>(), new[] { 1.0 })), "nothing to go by");
 });
 
+Test("check: feature-line runs break at stations without the code; the join along a valley is measured between stations", () =>
+{
+  var runs = BuiltCheck.Runs(new[] { true, true, false, false, true, true, true, false, true });
+  True(runs.Count == 3 && runs[0] == (0, 1) && runs[1] == (4, 6) && runs[2] == (8, 8), $"runs {string.Join(" ", runs)}");
+  True(BuiltCheck.Runs(Array.Empty<bool>()).Count == 0, "no stations, no runs");
+
+  // valley line with a kink at (4, 1): points on it at both ends of a chord that spans the kink cut the corner
+  IReadOnlyList<P3> valley = new List<P3> { new(0, 0, 10), new(4, 1, 12), new(8, 0, 14) };
+  var lines = new List<IReadOnlyList<P3>> { valley };
+  var onLine = new List<(double, P3)> { (100, new P3(1, 0.25, 10.5)), (101, new P3(3, 0.75, 11.5)), (102, new P3(4, 1, 12)) };
+  var exact = BuiltCheck.ChainDeviation(onLine, lines);
+  Near(exact.Plan, 0, 1e-9, "chords along straight pieces of the line"); Near(exact.Level, 0, 1e-9, "level on the line");
+  var across = new List<(double, P3)> { (100, new P3(2, 0.5, 11)), (101, new P3(6, 0.5, 13)) };
+  var cut = BuiltCheck.ChainDeviation(across, lines);
+  True(cut.Plan > 0.4 && cut.Plan < 0.5, $"chord across the kink: {cut.Plan:0.###}"); True(cut.BetweenA == 100 && cut.BetweenB == 101, "stations of the worst chord");
+  var off = BuiltCheck.ChainDeviation(new List<(double, P3)> { (100, new P3(1, 0.25, 10.8)), (101, new P3(3, 0.75, 11.5)) }, lines);
+  Near(off.Level, 0.3, 1e-9, "a point off the line in level");
+  Near(cut.LongestChord, 4, 1e-9, "longest chord");
+  // two legs' ends interleave along the line: in station order they zig-zag, along the line they follow it
+  var legs = new List<P3> { new(6, 0.5, 13), new(2, 0.5, 11), new(1, 0.25, 10.5), new(3, 0.75, 11.5), new(7, 0.25, 13.5) };
+  var order = BuiltCheck.OrderAlong(legs, lines);
+  True(string.Join(",", order) == "2,1,3,0,4", $"order along the line {string.Join(",", order)}");
+
+  // angle point: overlap window PI ± reach·tan(turn/2); 10 m reach, 20 deg -> 1.763 m
+  var turn = 20 * Math.PI / 180;
+  var sparse = BuiltCheck.AngleCoverage(100, 10, turn, new double[] { 90, 95, 105, 110 });
+  Near(sparse.HalfLength, 10 * Math.Tan(turn / 2), 1e-9, "window"); True(!sparse.Covered, "5 m stations miss a 1.76 m window");
+  True(sparse.NearestBefore == 95 && sparse.NearestAfter == 105, "nearest stations reported");
+  var dense = BuiltCheck.AngleCoverage(100, 10, turn, Enumerable.Range(0, 21).Select(i => 90 + i * 1.0).ToList());
+  True(dense.Covered && dense.StationBefore == 99 && dense.StationAfter == 101, "1 m stations cover it");
+  True(!BuiltCheck.AngleCoverage(100, 10, turn, new double[] { 99, 100, 105 }).Covered, "a station on the PI is no leg's; one leg only is not enough");
+
+  // curve R = 20 (turn 0.5 rad over 10 m): reach 15 stays inside the radius (no overlap possible), reach 25 does not
+  True(BuiltCheck.CurveCoverage(100, 110, 15, 0.5, new double[] { 95, 115 }).Covered, "reach inside the radius: nothing to see");
+  True(!BuiltCheck.CurveCoverage(100, 110, 25, 0.5, new double[] { 95, 105, 115 }).Covered, "one station on the arc is not enough");
+  True(BuiltCheck.CurveCoverage(100, 110, 25, 0.5, new double[] { 101, 109 }).Covered, "two stations on the arc");
+
+  // a link crossing a valley line, one ending on it, one touching a vertex between its segments
+  IReadOnlyList<P3> v = new List<P3> { new(0, 0, 0), new(0, 5, 0), new(0, 10, 0) };
+  True(BuiltCheck.SegmentPolyline(new P3(-1, 2, 0), new P3(1, 2, 0), v, 0.005).Count == 1, "crosses");
+  True(BuiltCheck.SegmentPolyline(new P3(-1, 2, 0), new P3(0, 2, 0), v, 0.005).Count == 0, "ends on the line");
+  True(BuiltCheck.SegmentPolyline(new P3(-1, 5, 0), new P3(1, 5, 0), v, 0.005).Count >= 1, "through a vertex between segments still crosses");
+  True(BuiltCheck.SegmentPolyline(new P3(-1, 0, 0), new P3(1, 0, 0), v, 0.005).Count == 0, "at the line's own end: touching");
+});
+
 Test("refresh: section compare - same design agrees, other slope / lane width / reach are found", () =>
 {
   SectionSample S(double lane, double slope, double reach, double start = 1.05) => new SectionSample

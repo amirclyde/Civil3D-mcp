@@ -554,6 +554,9 @@ const CorridorBowtieCheckArgsSchema = z.object({
   code: z.string().optional(),
   tolerance: z.number().nonnegative().optional(),
   maxListed: z.number().int().positive().optional(),
+  valleyTolerance: z.number().nonnegative().optional(),
+  joinTolerance: z.number().nonnegative().optional(),
+  minTurnDegrees: z.number().nonnegative().optional(),
 });
 
 // ─── Canonical input shape ────────────────────────────────────────────────────
@@ -671,6 +674,8 @@ const canonicalCorridorInputShape = {
   createAlignment: z.boolean().optional().describe("bowtie_valley: create the valley alignment (default true; false = compute only)."),
   minOffset: z.number().nonnegative().optional().describe("bowtie_check: only links reaching beyond this offset (e.g. past a drain's outer wall)."),
   tolerance: z.number().nonnegative().optional().describe("bowtie_check: crossings closer than this to a link end count as touching (default 0.005 m). bowtie_refresh: a valley that moved less than this stays as it is (default 0.01 m)."),
+  valleyTolerance: z.number().nonnegative().optional().describe("bowtie_check: largest distance, in plan and in level, of a section's Valley end from the valley line it is clipped to (default 0.01 m)."),
+  joinTolerance: z.number().nonnegative().optional().describe("bowtie_check: how far the built surface may leave the valley line between neighbouring Valley ends before a note says the stations are too far apart there (default 0.05 m; does not change the status)."),
   allowMismatch: z.boolean().optional().describe("bowtie_valley / bowtie_refresh: build the valley even when a check fails (different inside sections, meet stations not straddling the bend or outside the region); default false = refuse."),
   rebuildFirst: z.boolean().optional().describe("bowtie_refresh: rebuild the corridor before reading its sections (default true; dry runs never rebuild)."),
   clipInset: z.number().nonnegative().max(5).optional().describe("bowtie_valley / bowtie_refresh, curved bends only: how far short of the curve's centre of curvature the inside sections stop, in metres (default 2 % of the radius, clamped to 0.05-0.5 m)."),
@@ -686,7 +691,7 @@ const canonicalCorridorInputShape = {
   maxLevelAdjust: z.number().nonnegative().optional().describe("bowtie_seam with levelFromTarget: largest distance a link may be moved off its own slope (default 0.30 m); above it the bend is a design conflict."),
   acceptOffSurfaceEnds: z.boolean().optional().describe("bowtie_seam / bowtie_fix: accept clipped sections that never come near the daylight surface (walls, fixed-width sections in a region that still has a surface target). Default false: that usually means the wrong surface."),
   writeAs: z.enum(["feature_line", "alignment"]).optional().describe("bowtie_seam: write the valley line and the apex bar as siteless feature lines carrying their levels (default) or as alignments."),
-  minTurnDegrees: z.number().nonnegative().optional().describe("bowtie_bends / bowtie_fix: bends turning less than this are ignored (default 3)."),
+  minTurnDegrees: z.number().nonnegative().optional().describe("bowtie_bends / bowtie_fix / bowtie_check: bends turning less than this are ignored (default 3)."),
   adjustFrom: z.enum(["auto", "hinge", "last_link"]).optional().describe("bowtie_seam / bowtie_fix: how the clip part takes a link to the valley level - hinge (spread over every slope and bench from the hinge: UTNM_LaneDaylightClip v0.4, Spread From Hinge = Yes), last_link (v0.3, or Spread From Hinge = No); auto (default) reads it from the clip assembly."),
   levelRule: z.enum(["no_steeper", "mean"]).optional().describe("bowtie_seam / bowtie_fix: the valley level where the two sides differ - no_steeper (default: a side in cut is only lowered, in fill only raised, so no slope comes out steeper than designed; the mean where no such level exists, flagged) or mean (halfway)."),
   clipAssembly: z.string().optional().describe("bowtie_seam: the clip assembly the region will get (for adjustFrom auto); bowtie_fix fills it from assemblyName."),
@@ -1605,6 +1610,10 @@ export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
           if (!check.ok) return await rollback("check", `The result could not be checked: ${check.error}.`);
           stages.check = check.value;
           if (check.value?.clean !== true) return await rollback("check", "The repair was applied but the built corridor still shows crossings or loops (see stages.check).");
+          // the repair's own evidence: its sections end on the valley line, none crosses it, the join between them stays on it
+          const ownRepair = (check.value?.sides ?? []).flatMap((sd: any) => sd?.repairs ?? []).find((r: any) => names.includes(String(r?.valleyLine)));
+          if (ownRepair && ownRepair.result !== "verified")
+            return await rollback("check", `The repair was applied but its sections do not end cleanly on the valley line: ${ownRepair.result} (see stages.check).`);
           const regionNames = pieces.map((p) => p.name);
           return out("repaired", `Bend ${from}-${to} (${side}) repaired in ${regionNames.length > 1 ? "regions" : "region"} ${regionNames.map((n) => `'${n}'`).join(" + ")}: no link crossings, no daylight loops.`,
             { regions: regionNames, valleyLines: names, highlight: seam?.highlight ?? preview?.highlight ?? null, levelMove: seam?.result?.checks?.maxLevelAdjust ?? null, slopeChange: seam?.result?.checks?.maxSlopeChange ?? null });
@@ -1834,6 +1843,9 @@ export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
           code: args.code ?? null,
           tolerance: args.tolerance ?? null,
           maxListed: args.maxListed ?? null,
+          valleyTolerance: args.valleyTolerance ?? null,
+          joinTolerance: args.joinTolerance ?? null,
+          minTurnDegrees: args.minTurnDegrees ?? null,
         }),
       ),
     },
@@ -1842,7 +1854,7 @@ export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
     {
       toolName: "civil3d_corridor",
       displayName: "Civil 3D Corridor",
-      description: "Creates and reads Civil 3D corridors (create = assembly on an alignment + profile, or on a feature line, one baseline and region), controls rebuild, computes volumes, manages regions (add, split, isolate station ranges, merge, delete), predicts bowties (bowtie_predict: where the inside edge runs backwards or crosses itself, with a split plan), builds the valley line of a bend as a clip target (bowtie_valley; refuses bends whose legs differ or whose valley meets the ground on the wrong side or outside the region) and refreshes every repair after a design change (bowtie_refresh: each valley solved again on the design as it now is, replaced where it moved, a stale clip assembly or a bend that moved reported; one transaction, a dry run puts everything back), repairs one bend in one step (bowtie_fix: solve, isolate the clash range with an optional clip assembly whose surface targets are carried over, write the valley lines, map ClipTarget + ClipElev, rebuild, check), verifies the built result (bowtie_check: link crossings and feature-line loops), reports long runs (bowtie_fix_report: progress and results of bowtie_fix / bowtie_refresh, read-only), lists or removes a region's added stations (region_stations); dry runs and listings need no approval, assembly frequency and subassembly target mappings, builds corridor surfaces (link/feature-line codes, overhang correction, boundaries) and extracts corridor solids through a single domain tool.",
+      description: "Creates and reads Civil 3D corridors (create = assembly on an alignment + profile, or on a feature line, one baseline and region), controls rebuild, computes volumes, manages regions (add, split, isolate station ranges, merge, delete), predicts bowties (bowtie_predict: where the inside edge runs backwards or crosses itself, with a split plan), builds the valley line of a bend as a clip target (bowtie_valley; refuses bends whose legs differ or whose valley meets the ground on the wrong side or outside the region) and refreshes every repair after a design change (bowtie_refresh: each valley solved again on the design as it now is, replaced where it moved, a stale clip assembly or a bend that moved reported; one transaction, a dry run puts everything back), repairs one bend in one step (bowtie_fix: solve, isolate the clash range with an optional clip assembly whose surface targets are carried over, write the valley lines, map ClipTarget + ClipElev, rebuild, check), verifies the built result (bowtie_check: status verified / invalid_candidate / unsupported / insufficient_data from link crossings, feature-line loops, each repair's sections ending on its valley line with a continuous join, and whether the stations at each unrepaired bend are dense enough to show a bowtie), reports long runs (bowtie_fix_report: progress and results of bowtie_fix / bowtie_refresh, read-only), lists or removes a region's added stations (region_stations); dry runs and listings need no approval, assembly frequency and subassembly target mappings, builds corridor surfaces (link/feature-line codes, overhang correction, boundaries) and extracts corridor solids through a single domain tool.",
       inputShape: canonicalCorridorInputShape,
       supportedActions: [
         "list",
