@@ -357,6 +357,33 @@ export function captureDomainToolHandlers(definition: DomainToolDefinition) {
   }
 }
 
+// A client that still holds an older copy of a tool's schema sends the fields it does not know as text ("true", "2.5").
+// Boolean and number fields accept that text, so a stale client can use new options without a restart.
+function unwrapOptional(schema: ZodTypeAny): { inner: ZodTypeAny; optional: boolean } {
+  let inner = schema; let optional = false;
+  while (inner instanceof z.ZodOptional || inner instanceof z.ZodNullable || inner instanceof z.ZodDefault) {
+    optional = true;
+    inner = (inner as any)._def.innerType as ZodTypeAny;
+  }
+  return { inner, optional };
+}
+function coerceText(value: unknown, kind: "boolean" | "number"): unknown {
+  if (typeof value !== "string") return value;
+  const text = value.trim();
+  if (kind === "boolean") return /^true$/i.test(text) ? true : /^false$/i.test(text) ? false : value;
+  return text !== "" && Number.isFinite(Number(text)) ? Number(text) : value;
+}
+export function tolerantInputShape(shape: ZodRawShape): ZodRawShape {
+  const out: ZodRawShape = {};
+  for (const [key, schema] of Object.entries(shape)) {
+    const { inner } = unwrapOptional(schema as ZodTypeAny);
+    if (inner instanceof z.ZodBoolean) out[key] = z.preprocess((v) => coerceText(v, "boolean"), schema as ZodTypeAny);
+    else if (inner instanceof z.ZodNumber) out[key] = z.preprocess((v) => coerceText(v, "number"), schema as ZodTypeAny);
+    else out[key] = schema;
+  }
+  return out;
+}
+
 export function registerSelectedDomainTools(
   server: McpServer,
   definition: DomainToolDefinition,
@@ -369,7 +396,7 @@ export function registerSelectedDomainTools(
         title: exposure.displayName,
         description: exposure.description,
         inputSchema: {
-          ...exposure.inputShape,
+          ...tolerantInputShape(exposure.inputShape),
           approvalToken: z.string().min(1).optional(),
           idempotencyKey: z.string().min(1).max(128).optional(),
         },
