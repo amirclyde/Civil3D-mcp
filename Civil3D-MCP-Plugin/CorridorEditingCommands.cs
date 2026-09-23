@@ -400,19 +400,33 @@ public static class CorridorEditingCommands
   {
     var corridorName = PluginRuntime.GetRequiredString(parameters, "corridorName");
     var baselineIndex = PluginRuntime.GetOptionalInt(parameters, "baselineIndex") ?? 0;
-    var regionIndex = PluginRuntime.GetOptionalInt(parameters, "regionIndex") ?? 0;
+    var regionIndexArg = PluginRuntime.GetOptionalInt(parameters, "regionIndex");
+    var regionName = PluginRuntime.GetOptionalString(parameters, "regionName");
     var frequency = PluginRuntime.GetRequiredDouble(parameters, "frequency");
     var rebuild = PluginRuntime.GetOptionalBool(parameters, "rebuild") ?? true;
     if (frequency <= 0)
       throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "frequency must be greater than zero.");
+    // never fall back to region 0: a missing region is refused, not guessed
+    if (regionIndexArg == null && string.IsNullOrWhiteSpace(regionName))
+      throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "Give regionName or regionIndex. Nothing was changed.");
 
     return CivilExecution.WriteAsync<object?>((doc, civilDoc, database, transaction) =>
     {
       var corridor = CivilObjectUtils.FindCorridorByName(civilDoc, transaction, corridorName, OpenMode.ForWrite);
       var baseline = GetBaseline(corridor, baselineIndex);
+      var regionIndex = regionIndexArg ?? -1;
+      if (regionIndexArg == null)
+      {
+        for (var i = 0; i < baseline.BaselineRegions.Count; i++)
+          if (string.Equals(baseline.BaselineRegions[i].Name, regionName, StringComparison.OrdinalIgnoreCase)) { regionIndex = i; break; }
+        if (regionIndex < 0)
+          throw new JsonRpcDispatchException("CIVIL3D.OBJECT_NOT_FOUND", $"Region '{regionName}' was not found on baseline '{baseline.Name}'. Nothing was changed.");
+      }
       if (regionIndex < 0 || regionIndex >= baseline.BaselineRegions.Count)
         throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", $"Region index {regionIndex} is out of range.");
       var region = baseline.BaselineRegions[regionIndex];
+      if (regionIndexArg != null && !string.IsNullOrWhiteSpace(regionName) && !string.Equals(region.Name, regionName, StringComparison.OrdinalIgnoreCase))
+        throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", $"Region index {regionIndex} is '{region.Name}', not '{regionName}'. Nothing was changed.");
       ApplyFrequency(region, frequency);
       var rebuildError = rebuild ? TryRebuild(corridor) : null;
       return new Dictionary<string, object?>

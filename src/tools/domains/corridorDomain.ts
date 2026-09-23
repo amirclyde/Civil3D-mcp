@@ -202,6 +202,7 @@ const CorridorRegionFrequencyArgsSchema = z.object({
   name: z.string(),
   baselineIndex: z.number().int().nonnegative().optional(),
   regionIndex: z.number().int().nonnegative().optional(),
+  regionName: z.string().optional(),
   frequency: z.number().positive(),
   rebuild: z.boolean().optional(),
 });
@@ -455,6 +456,7 @@ const CorridorBowtieFixArgsSchema = CorridorBowtieSeamArgsSchema.extend({
   minTurnDegrees: z.number().nonnegative().optional(),
   keepOnFailure: z.boolean().optional(),
   assemblyMap: z.record(z.string()).optional(),
+  frequency: z.number().positive().optional(),
   parentRegion: z.string().optional(),
   parentAssembly: z.string().optional(),
   splitBefore: z.string().optional(),
@@ -479,6 +481,11 @@ const CorridorBowtieUnfixArgsSchema = z.object({
   restoreAssembly: z.boolean().optional(),
   rebuild: z.boolean().optional(),
   dryRun: z.boolean().optional(),
+});
+
+const CorridorBowtieFixReportArgsSchema = z.object({
+  action: z.literal("bowtie_fix_report"),
+  name: z.string().optional(),
 });
 
 const CorridorBowtieUnfixPreviewArgsSchema = CorridorBowtieUnfixArgsSchema.extend({
@@ -561,6 +568,7 @@ const canonicalCorridorInputShape = {
     "bowtie_seam",
     "bowtie_fix",
     "bowtie_bends",
+    "bowtie_fix_report",
     "bowtie_unfix",
     "bowtie_refresh",
     "bowtie_check",
@@ -611,7 +619,7 @@ const canonicalCorridorInputShape = {
   featureLineName: z.string().optional().describe("create: use a feature line as the baseline instead of alignment + profile (stations run 0 to its length)."),
   featureLineHandle: z.string().optional().describe("create: feature line by AutoCAD handle, for unnamed or duplicate-named feature lines."),
   baselineName: z.string().optional(),
-  regionName: z.string().optional().describe("region_stations / target_mapping_set: the region (or regionIndex); an unknown name is refused. bowtie_refresh: only this region (default: every region whose ClipTarget is mapped to an alignment)."),
+  regionName: z.string().optional().describe("region_stations / target_mapping_set / region_frequency: the region (or regionIndex); an unknown name is refused. bowtie_refresh: only this region (default: every region whose ClipTarget is mapped to an alignment)."),
   corridorSurface: z.string().optional(),
   referenceSurface: z.string().optional(),
   regionIndex: z.number().int().nonnegative().optional(),
@@ -620,7 +628,7 @@ const canonicalCorridorInputShape = {
   assemblyName: z.string().optional(),
   startStation: z.number().optional(),
   endStation: z.number().optional(),
-  frequency: z.number().positive().optional().describe("Assembly frequency in drawing units, applied along tangents, curves, spirals and profile curves."),
+  frequency: z.number().positive().optional().describe("Assembly frequency in drawing units, applied along tangents, curves, spirals and profile curves. bowtie_fix: frequency of the repaired region(s) (default 1 m; the parent region's frequency comes back with bowtie_unfix)."),
   rebuild: z.boolean().optional().describe("Rebuild the corridor after the change (default true)."),
   side: z.enum(["left", "right", "both"]).optional().describe("bowtie_predict / bowtie_check: side(s) to scan (default both). bowtie_valley: the inside of the bend (left or right)."),
   widthSource: z.enum(["built", "fixed"]).optional().describe("bowtie_predict: built = inside reach from the built corridor sections (default); fixed = insideWidth / leftWidth / rightWidth."),
@@ -751,6 +759,22 @@ function bowtieRefreshParams(args: CorridorRawArgs, dryRun: boolean) {
     allowMismatch: args.allowMismatch ?? false,
     clipInset: args.clipInset ?? null,
   };
+}
+
+// bowtie_fix can run longer than a client waits (a remote bridge gives up after about a minute) while the server carries on
+// and finishes the repair: every report is kept here so bowtie_fix_report can hand it over afterwards.
+type FixReport = { at: string; durationMs: number; corridorName: string | null; startStation: number | null; endStation: number | null; ok: boolean; report: unknown; error: string | null };
+const recentFixReports: FixReport[] = [];
+function rememberFixReport(args: Record<string, unknown>, started: number, report: unknown, error: unknown) {
+  recentFixReports.push({
+    at: new Date().toISOString(), durationMs: Date.now() - started,
+    corridorName: typeof args.name === "string" ? args.name : null,
+    startStation: typeof args.startStation === "number" ? args.startStation : null,
+    endStation: typeof args.endStation === "number" ? args.endStation : null,
+    ok: error == null && (report as any)?.ok !== false, report: report ?? null,
+    error: error == null ? null : error instanceof Error ? error.message : String(error),
+  });
+  while (recentFixReports.length > 20) recentFixReports.shift();
 }
 
 export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
@@ -997,7 +1021,8 @@ export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
         async (appClient) => await appClient.sendCommand("setCorridorRegionFrequency", {
           corridorName: args.name,
           baselineIndex: args.baselineIndex ?? 0,
-          regionIndex: args.regionIndex ?? 0,
+          regionIndex: args.regionIndex ?? null,
+          regionName: args.regionName ?? null,
           frequency: args.frequency,
           rebuild: args.rebuild ?? true,
         }),
@@ -1361,7 +1386,7 @@ export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
       requiresActiveDrawing: true,
       safeForRetry: false,
       pluginMethods: ["bowtieBends", "bowtieSeam", "isolateCorridorRanges", "getCorridorTargetMappings", "setCorridorTargetMappings", "checkCorridorBowties", "bowtieUnfix"],
-      execute: async (args) => await withApplicationConnection(async (appClient) => {
+      execute: async (args) => { const started = Date.now(); try { const fixReport = await withApplicationConnection(async (appClient) => {
         const call = async (method: string, params: Record<string, unknown>): Promise<{ ok: true; value: any } | { ok: false; error: string }> => {
           try { return { ok: true, value: await appClient.sendCommand(method, params) }; }
           catch (e) { return { ok: false, error: e instanceof Error ? e.message : String(e) }; }
@@ -1408,18 +1433,22 @@ export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
           // 2. own region(s) for the clash range; a different assembly gets the parent's surface targets in the same transaction
           const swapping = (typeof args.assemblyName === "string" && args.assemblyName.length > 0) || (assemblyMap !== null && Object.keys(assemblyMap).length > 0);
           const alreadyIsolated = Math.abs(region.start - from) < 0.011 && Math.abs(region.end - to) < 0.011;
-          type Piece = { name: string; start: number; end: number; parentRegion: string | null; parentAssembly: string | null; splitBefore: string | null; splitAfter: string | null };
-          let pieces: Piece[] = [{ name: region.name, start: region.start, end: region.end, parentRegion: null, parentAssembly: null, splitBefore: null, splitAfter: null }];
+          type Piece = { name: string; start: number; end: number; parentRegion: string | null; parentAssembly: string | null; splitBefore: string | null; splitAfter: string | null; parentFrequency: string | null };
+          let pieces: Piece[] = [{ name: region.name, start: region.start, end: region.end, parentRegion: null, parentAssembly: null, splitBefore: null, splitAfter: null, parentFrequency: null }];
           let changed = false;
           const rollback = async (stage: string, message: string) => {
             if (!changed || args.keepOnFailure === true) return out("failed", `${message}${changed ? " The changes for this bend were left in the drawing (keepOnFailure)." : " Nothing was changed."}`, { failedAt: stage });
             const undone: any[] = []; let ok = true;
+            // one unfix of a region that carries the valley line puts back every piece recorded on it: skip those afterwards
+            const done = new Set<string>();
             for (const p of [...pieces].sort((a, b) => b.start - a.start)) {
+              if (done.has(p.name)) continue;
               const undo = await call("bowtieUnfix", {
                 corridorName: args.name, baselineIndex, regionName: p.name, merge: true, restoreAssembly: true, rebuild: true, dryRun: false,
-                parentRegion: p.parentRegion, parentAssembly: p.parentAssembly, splitBefore: p.splitBefore, splitAfter: p.splitAfter,
+                parentRegion: p.parentRegion, parentAssembly: p.parentAssembly, splitBefore: p.splitBefore, splitAfter: p.splitAfter, parentFrequency: p.parentFrequency,
               });
               ok = ok && undo.ok;
+              for (const x of ((undo.ok ? undo.value?.pieces ?? [] : []) as any[])) if (x?.region) done.add(String(x.region));
               undone.push(undo.ok ? { region: p.name, targetsCleared: undo.value?.targetsCleared, valleyLinesErased: undo.value?.valleyLinesErased, stationsDeleted: undo.value?.stationsDeleted, assemblyRestored: undo.value?.assemblyRestored, merged: undo.value?.merged, rebuildError: undo.value?.rebuildError, warnings: undo.value?.warnings } : { region: p.name, error: undo.error });
             }
             stages.rollback = undone;
@@ -1428,8 +1457,8 @@ export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
           if (!alreadyIsolated || swapping) {
             const iso = await call("isolateCorridorRanges", {
               corridorName: args.name, baselineIndex,
-              ranges: [{ startStation: from, endStation: to, ...(args.regionName && bends.length === 1 ? { name: args.regionName } : {}) }],
-              namePrefix: "BT", frequency: null, assemblyName: typeof args.assemblyName === "string" && args.assemblyName.length > 0 ? args.assemblyName : null,
+              ranges: [{ startStation: from, endStation: to, name: args.regionName && bends.length === 1 ? args.regionName : `BT-${Math.round(apexStation)}${side === "left" ? "L" : "R"}` }],
+              namePrefix: "BT", frequency: Number(args.frequency ?? 1), assemblyName: typeof args.assemblyName === "string" && args.assemblyName.length > 0 ? args.assemblyName : null,
               assemblyMap, matchParent: true, carrySurfaceTargets: true, dryRun: false, rebuild: swapping,
             });
             if (!iso.ok) return out("failed", `The region could not be isolated: ${iso.error}. Nothing was changed.`, { failedAt: "isolate" });
@@ -1439,7 +1468,7 @@ export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
             if (made.length === 0) return out("failed", `Nothing was isolated for ${from}-${to} (${JSON.stringify(isolated?.skipped ?? [])}).`, { failedAt: "isolate" });
             changed = true;
             pieces = made.map((m) => ({ name: String(m.name), start: Number(m.startStation), end: Number(m.endStation), parentRegion: m.fromRegion ?? null,
-              parentAssembly: m.parentAssemblyName ?? null, splitBefore: m.regionBefore ?? null, splitAfter: m.regionAfter ?? null }));
+              parentAssembly: m.parentAssemblyName ?? null, splitBefore: m.regionBefore ?? null, splitAfter: m.regionAfter ?? null, parentFrequency: m.parentFrequency ?? null }));
             if (isolated?.rebuildError) return await rollback("isolate", `The region was isolated but the rebuild failed: ${isolated.rebuildError}.`);
           }
           const apexPiece = pieces.find((p) => apexStation >= p.start - 0.011 && apexStation <= p.end + 0.011) ?? pieces[0];
@@ -1463,7 +1492,7 @@ export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
 
           // 4. the valley lines (after a swap: solved again on the clip assemblies' own, still unclipped, sections); the
           //    context of every piece is recorded on them so bowtie_unfix can put each region back later
-          const fixPieces = pieces.map((p) => [p.name, p.parentRegion ?? "", p.parentAssembly ?? "", p.splitBefore ?? "", p.splitAfter ?? ""].join("~")).join("|");
+          const fixPieces = pieces.map((p) => [p.name, p.parentRegion ?? "", p.parentAssembly ?? "", p.splitBefore ?? "", p.splitAfter ?? "", p.parentFrequency ?? ""].join("~")).join("|");
           const seamRes = await call("bowtieSeam", bowtieSeamParams({
             ...bendArgs, skipRegionCheck: true, fixPieces,
             parentRegion: apexPiece.parentRegion, parentAssembly: apexPiece.parentAssembly, splitBefore: apexPiece.splitBefore, splitAfter: apexPiece.splitAfter,
@@ -1518,7 +1547,20 @@ export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
           highlight: results.filter((r) => r.highlight || (typeof r.slopeChange === "number" && r.slopeChange > 0.1)).map((r) => ({ startStation: r.startStation, endStation: r.endStation, side: r.side, sectionChanges: r.highlight, levelMove: r.levelMove, slopeChange: r.slopeChange })),
           bends: results,
         };
-      }),
+      }); rememberFixReport(args, started, fixReport, null); return fixReport; } catch (e) { rememberFixReport(args, started, null, e); throw e; } },
+    },
+    bowtie_fix_report: {
+      action: "bowtie_fix_report",
+      inputSchema: CorridorBowtieFixReportArgsSchema,
+      responseSchema: GenericCorridorResponseSchema,
+      capabilities: ["query", "inspect"],
+      requiresActiveDrawing: false,
+      safeForRetry: true,
+      execute: async (args) => {
+        const name = typeof args.name === "string" && args.name.length > 0 ? args.name : null;
+        const reports = recentFixReports.filter((r) => !name || r.corridorName === name).slice().reverse();
+        return { reports, note: reports.length === 0 ? "No bowtie_fix has run in this server session." : "Newest first; kept in memory until the MCP server restarts." };
+      },
     },
     bowtie_bends: {
       action: "bowtie_bends",
@@ -1699,6 +1741,7 @@ export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
         "bowtie_seam_preview",
         "bowtie_fix",
         "bowtie_bends",
+        "bowtie_fix_report",
         "bowtie_unfix",
         "bowtie_unfix_preview",
         "bowtie_refresh",

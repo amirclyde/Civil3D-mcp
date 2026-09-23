@@ -832,6 +832,7 @@ public static partial class CorridorBowtieCommands
             ["assemblyName"] = AssemblyName(transaction, SafeAssemblyId(mid)),
             ["surfaceTargetsCarried"] = carried,
             ["frequency"] = ReadFrequency(mid),
+            ["parentFrequency"] = parentFrequency,
           });
         }
         counter++;
@@ -1068,7 +1069,8 @@ public static partial class CorridorBowtieCommands
     try
     {
       var s = region.AppliedAssemblySetting;
-      return $"{s.FrequencyAlongTangents:0.###}/{s.FrequencyAlongCurves:0.###}/{s.FrequencyAlongSpirals:0.###}/{s.FrequencyAlongProfileCurves:0.###}";
+      var inv = System.Globalization.CultureInfo.InvariantCulture;
+      return string.Join("/", new[] { s.FrequencyAlongTangents, s.FrequencyAlongCurves, s.FrequencyAlongSpirals, s.FrequencyAlongProfileCurves }.Select(f => f.ToString("0.###", inv)));
     }
     catch { return "?"; }
   }

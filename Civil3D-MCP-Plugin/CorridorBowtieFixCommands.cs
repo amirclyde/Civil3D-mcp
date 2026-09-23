@@ -164,6 +164,7 @@ public static partial class CorridorBowtieCommands
     var ctxAssembly = PluginRuntime.GetOptionalString(parameters, "parentAssembly");
     var ctxBefore = PluginRuntime.GetOptionalString(parameters, "splitBefore");
     var ctxAfter = PluginRuntime.GetOptionalString(parameters, "splitAfter");
+    var ctxFrequency = PluginRuntime.GetOptionalString(parameters, "parentFrequency");
 
     Func<Autodesk.AutoCAD.ApplicationServices.Document, CivilDocument, Database, Transaction, object?> work = (doc, civilDoc, database, transaction) =>
     {
@@ -203,19 +204,30 @@ public static partial class CorridorBowtieCommands
         }
         toErase.Add((id, name, obj is FeatureLine ? "feature_line" : "alignment"));
       }
-      // a repair over two regions records each piece: "region~parent~parentAssembly~before~after|..."
+      // a repair over two regions records each piece: "region~parent~parentAssembly~before~after[~frequency]|..."; every piece
+      // is put back, not only the one named (the valley line they share is erased, so the others would be left half-repaired)
+      var pieces = new List<UnfixPiece>();
       if (record.TryGetValue("pieces", out var piecesText) && piecesText.Length > 0)
-        foreach (var piece in piecesText.Split('|', StringSplitOptions.RemoveEmptyEntries))
+        foreach (var pieceText in piecesText.Split('|', StringSplitOptions.RemoveEmptyEntries))
         {
-          var f = piece.Split('~');
-          if (f.Length < 5 || !string.Equals(f[0].Trim(), region.Name, StringComparison.OrdinalIgnoreCase)) continue;
-          record["parent"] = f[1].Trim(); record["parentAssembly"] = f[2].Trim(); record["before"] = f[3].Trim(); record["after"] = f[4].Trim();
+          var f = pieceText.Split('~');
+          if (f.Length < 5 || f[0].Trim().Length == 0) continue;
+          pieces.Add(new UnfixPiece(f[0].Trim(), Blank(f[1]), Blank(f[2]), Blank(f[3]), Blank(f[4]), f.Length > 5 ? Blank(f[5]) : null));
         }
       string? Rec(string key, string? given) => !string.IsNullOrWhiteSpace(given) ? given : record.TryGetValue(key, out var v) && v.Length > 0 ? v : null;
-      var parent = Rec("parent", ctxParent);
-      var parentAssembly = Rec("parentAssembly", ctxAssembly);
-      var before = Rec("before", ctxBefore);
-      var after = Rec("after", ctxAfter);
+      var own = pieces.FirstOrDefault(x => string.Equals(x.Region, region.Name, StringComparison.OrdinalIgnoreCase));
+      var ownPiece = new UnfixPiece(region.Name,
+        !string.IsNullOrWhiteSpace(ctxParent) ? ctxParent : own?.Parent ?? Rec("parent", null),
+        !string.IsNullOrWhiteSpace(ctxAssembly) ? ctxAssembly : own?.ParentAssembly ?? Rec("parentAssembly", null),
+        !string.IsNullOrWhiteSpace(ctxBefore) ? ctxBefore : own != null ? own.Before : Rec("before", null),
+        !string.IsNullOrWhiteSpace(ctxAfter) ? ctxAfter : own != null ? own.After : Rec("after", null),
+        !string.IsNullOrWhiteSpace(ctxFrequency) ? ctxFrequency : own?.Frequency ?? Rec("parentFrequency", null));
+      var work = new List<UnfixPiece> { ownPiece };
+      foreach (var other in pieces)
+        if (!string.Equals(other.Region, region.Name, StringComparison.OrdinalIgnoreCase) && IndexOfName(baseline, other.Region) >= 0) work.Add(other);
+      foreach (var other in pieces)
+        if (!string.Equals(other.Region, region.Name, StringComparison.OrdinalIgnoreCase) && IndexOfName(baseline, other.Region) < 0)
+          warnings.Add($"The piece '{other.Region}' recorded for this repair is not on the baseline any more: it is left as it is.");
       var stations = (Rec("stations", null) ?? "").Split('|', StringSplitOptions.RemoveEmptyEntries)
         .Select(x => double.TryParse(x, NumberStyles.Float, CultureInfo.InvariantCulture, out var d) ? d : double.NaN).Where(d => !double.IsNaN(d)).ToList();
 
@@ -224,9 +236,16 @@ public static partial class CorridorBowtieCommands
         ["clearTargets"] = cleared,
         ["eraseValleyLines"] = toErase.Select(x => x.Name).ToList(),
         ["deleteStations"] = stations.Select(x => Math.Round(x, 4)).ToList(),
-        ["restoreAssembly"] = restoreAssembly ? parentAssembly : null,
-        ["mergeWith"] = merge ? new[] { before, after }.Where(x => !string.IsNullOrEmpty(x)).ToList() : new List<string?>(),
-        ["restoreName"] = merge ? parent : null,
+        ["restoreAssembly"] = restoreAssembly ? ownPiece.ParentAssembly : null,
+        ["mergeWith"] = merge ? new[] { ownPiece.Before, ownPiece.After }.Where(x => !string.IsNullOrEmpty(x)).ToList() : new List<string?>(),
+        ["restoreName"] = merge ? ownPiece.Parent : null,
+        ["restoreFrequency"] = ownPiece.Frequency,
+        ["pieces"] = work.Select(x => new Dictionary<string, object?>
+        {
+          ["region"] = x.Region, ["restoreAssembly"] = restoreAssembly ? x.ParentAssembly : null,
+          ["mergeWith"] = merge ? new[] { x.Before, x.After }.Where(n => !string.IsNullOrEmpty(n)).ToList() : new List<string?>(),
+          ["restoreName"] = merge ? x.Parent : null, ["restoreFrequency"] = x.Frequency,
+        }).ToList(),
       };
       if (dryRun)
         return new Dictionary<string, object?> { ["corridorName"] = corridor.Name, ["regionName"] = region.Name, ["dryRun"] = true, ["plan"] = plan, ["warnings"] = warnings };
@@ -267,68 +286,47 @@ public static partial class CorridorBowtieCommands
         try { var ent = transaction.GetObject(id, OpenMode.ForWrite); ent.Erase(); erased.Add(name); }
         catch (Exception ex) { warnings.Add($"'{name}' could not be erased: {ex.Message}"); }
       }
-      // ---- 3. the meet stations bowtie_seam added
+      // ---- 3. the meet stations bowtie_seam added, from whichever piece holds each one
       var deleted = new List<double>();
-      if (stations.Count > 0)
+      foreach (var st in stations)
       {
-        double[] added;
-        try { added = region.AdditionalStations() ?? Array.Empty<double>(); } catch { added = Array.Empty<double>(); }
-        foreach (var st in stations)
+        var found = false;
+        foreach (var piece in work)
         {
+          var idx = IndexOfName(baseline, piece.Region);
+          if (idx < 0) continue;
+          var holder = baseline.BaselineRegions[idx];
+          double[] added;
+          try { added = holder.AdditionalStations() ?? Array.Empty<double>(); } catch { added = Array.Empty<double>(); }
           var match = added.Cast<double?>().FirstOrDefault(a => Math.Abs(a!.Value - st) < 1e-3);
           if (!match.HasValue) continue;
-          try { region.DeleteStation(match.Value); deleted.Add(Math.Round(match.Value, 4)); }
-          catch (Exception ex) { warnings.Add($"Station {st:0.###} could not be removed: {ex.Message}"); }
+          try { holder.DeleteStation(match.Value); deleted.Add(Math.Round(match.Value, 4)); }
+          catch (Exception ex) { warnings.Add($"Station {st:0.###} could not be removed from '{holder.Name}': {ex.Message}"); }
+          found = true; break;
         }
+        if (!found) warnings.Add($"Station {st:0.###} was not found as an added station of the repaired region(s).");
       }
-      // ---- 4. the parent assembly, with the surface targets the region has now
+      // ---- 4./5. every piece: its parent assembly (with the surface targets it has now), merged back with the pieces it was
+      //            cut from, the parent's name and frequency. Highest station first, so a merge never moves a piece still to do.
       string? restored = null;
-      if (restoreAssembly && !string.IsNullOrWhiteSpace(parentAssembly) && !string.Equals(AssemblyName(transaction, SafeAssemblyId(region)), parentAssembly, StringComparison.OrdinalIgnoreCase))
-      {
-        var asmId = FindAssemblyId(civilDoc, transaction, parentAssembly!);
-        ObjectIdCollection? surfaces = null;
-        var now = region.GetTargets();
-        for (var i = 0; i < now.Count; i++)
-          if (now[i].TargetType == SubassemblyLogicalNameType.Surface && now[i].TargetIds.Count > 0) { surfaces = now[i].TargetIds; break; }
-        region.AssemblyId = asmId;
-        if (surfaces != null)
-        {
-          var fresh = region.GetTargets();
-          var set = false;
-          for (var i = 0; i < fresh.Count; i++)
-          {
-            if (fresh[i].TargetType != SubassemblyLogicalNameType.Surface || fresh[i].TargetIds.Count > 0) continue;
-            var ids = new ObjectIdCollection(); foreach (ObjectId id in surfaces) ids.Add(id);
-            fresh[i].TargetIds = ids; set = true;
-          }
-          if (set) region.SetTargets(fresh);
-        }
-        restored = parentAssembly;
-      }
-      // ---- 5. merge back with the pieces it was cut from
       Dictionary<string, object?>? merged = null;
-      if (merge && (!string.IsNullOrEmpty(before) || !string.IsNullOrEmpty(after)))
+      var restoredPieces = new List<Dictionary<string, object?>>();
+      foreach (var piece in work.OrderByDescending(x => { var i = IndexOfName(baseline, x.Region); return i < 0 ? -1 : baseline.BaselineRegions[i].StartStation; }))
       {
-        var mid = IndexOfName(baseline, region.Name);
-        var first = !string.IsNullOrEmpty(before) ? IndexOfName(baseline, before!) : mid;
-        var last = !string.IsNullOrEmpty(after) ? IndexOfName(baseline, after!) : mid;
-        if (first >= 0 && last > first && mid >= first && mid <= last && last - first <= 2)
+        var idx = IndexOfName(baseline, piece.Region);
+        if (idx < 0) continue;
+        var target = baseline.BaselineRegions[idx];
+        var pieceRestored = RestoreParentAssembly(civilDoc, transaction, target, restoreAssembly ? piece.ParentAssembly : null);
+        var pieceMerged = merge ? MergeBack(baseline, target.Name, piece, warnings) : null;
+        var finalName = (string?)pieceMerged?["name"] ?? target.Name;
+        if (!string.IsNullOrWhiteSpace(piece.Frequency))
         {
-          var regions = baseline.BaselineRegions;
-          var a = regions[first]; var b = regions[last];
-          try
-          {
-            a.Merge(a, b);
-            if (!string.IsNullOrWhiteSpace(parent)) a.Name = UniqueRegionName(baseline, parent!, a);
-            merged = new Dictionary<string, object?> { ["name"] = a.Name, ["startStation"] = a.StartStation, ["endStation"] = a.EndStation };
-          }
-          catch (Exception ex) { warnings.Add($"The regions could not be merged back ({ex.GetType().Name}: {ex.Message}); they are left split."); }
+          var fi = IndexOfName(baseline, finalName);
+          if (fi >= 0 && !TryApplyFrequencySignature(baseline.BaselineRegions[fi], piece.Frequency!))
+            warnings.Add($"The frequency '{piece.Frequency}' recorded for '{piece.Region}' could not be put back on '{finalName}'.");
         }
-        else warnings.Add($"The pieces '{before}' / '{after}' recorded for '{region.Name}' are not next to it any more: the regions are left split.");
-      }
-      else if (merge && !string.IsNullOrWhiteSpace(parent) && !string.Equals(region.Name, parent, StringComparison.OrdinalIgnoreCase))
-      {
-        try { region.Name = UniqueRegionName(baseline, parent!, region); } catch { }
+        if (ReferenceEquals(piece, ownPiece)) { restored = pieceRestored; merged = pieceMerged; }
+        restoredPieces.Add(new Dictionary<string, object?> { ["region"] = piece.Region, ["assemblyRestored"] = pieceRestored, ["merged"] = pieceMerged, ["name"] = finalName, ["frequency"] = piece.Frequency });
       }
 
       var rebuildError = rebuild ? TryRebuild(corridor) : null;
@@ -342,6 +340,7 @@ public static partial class CorridorBowtieCommands
         ["stationsDeleted"] = deleted,
         ["assemblyRestored"] = restored,
         ["merged"] = merged,
+        ["pieces"] = restoredPieces,
         ["rebuilt"] = rebuild && rebuildError == null,
         ["rebuildError"] = rebuildError,
         ["regions"] = ListRegions(baseline, transaction),
@@ -349,5 +348,87 @@ public static partial class CorridorBowtieCommands
       };
     };
     return dryRun ? CivilExecution.ReadAsync<object?>(work) : CivilExecution.WriteAsync<object?>(work);
+  }
+
+  private sealed record UnfixPiece(string Region, string? Parent, string? ParentAssembly, string? Before, string? After, string? Frequency);
+
+  private static string? Blank(string? s) => string.IsNullOrWhiteSpace(s) ? null : s.Trim();
+
+  /// <summary>Gives a region back its parent assembly, with the surface targets it has now. Returns the assembly name, or null when
+  /// nothing changed.</summary>
+  private static string? RestoreParentAssembly(CivilDocument civilDoc, Transaction transaction, BaselineRegion region, string? parentAssembly)
+  {
+    if (string.IsNullOrWhiteSpace(parentAssembly) || string.Equals(AssemblyName(transaction, SafeAssemblyId(region)), parentAssembly, StringComparison.OrdinalIgnoreCase)) return null;
+    var asmId = FindAssemblyId(civilDoc, transaction, parentAssembly!);
+    ObjectIdCollection? surfaces = null;
+    var now = region.GetTargets();
+    for (var i = 0; i < now.Count; i++)
+      if (now[i].TargetType == SubassemblyLogicalNameType.Surface && now[i].TargetIds.Count > 0) { surfaces = now[i].TargetIds; break; }
+    region.AssemblyId = asmId;
+    if (surfaces != null)
+    {
+      var fresh = region.GetTargets();
+      var set = false;
+      for (var i = 0; i < fresh.Count; i++)
+      {
+        if (fresh[i].TargetType != SubassemblyLogicalNameType.Surface || fresh[i].TargetIds.Count > 0) continue;
+        var ids = new ObjectIdCollection(); foreach (ObjectId id in surfaces) ids.Add(id);
+        fresh[i].TargetIds = ids; set = true;
+      }
+      if (set) region.SetTargets(fresh);
+    }
+    return parentAssembly;
+  }
+
+  /// <summary>Merges a repaired region back with the regions it was split from and gives the result the parent's name.</summary>
+  private static Dictionary<string, object?>? MergeBack(Baseline baseline, string regionName, UnfixPiece piece, List<string> warnings)
+  {
+    if (!string.IsNullOrEmpty(piece.Before) || !string.IsNullOrEmpty(piece.After))
+    {
+      var mid = IndexOfName(baseline, regionName);
+      var first = !string.IsNullOrEmpty(piece.Before) ? IndexOfName(baseline, piece.Before!) : mid;
+      var last = !string.IsNullOrEmpty(piece.After) ? IndexOfName(baseline, piece.After!) : mid;
+      if (first >= 0 && last > first && mid >= first && mid <= last && last - first <= 2)
+      {
+        var regions = baseline.BaselineRegions;
+        var a = regions[first]; var b = regions[last];
+        try
+        {
+          a.Merge(a, b);
+          if (!string.IsNullOrWhiteSpace(piece.Parent)) a.Name = UniqueRegionName(baseline, piece.Parent!, a);
+          return new Dictionary<string, object?> { ["name"] = a.Name, ["startStation"] = a.StartStation, ["endStation"] = a.EndStation };
+        }
+        catch (Exception ex) { warnings.Add($"'{regionName}' could not be merged back ({ex.GetType().Name}: {ex.Message}); the regions are left split."); return null; }
+      }
+      warnings.Add($"The pieces '{piece.Before}' / '{piece.After}' recorded for '{regionName}' are not next to it any more: the regions are left split.");
+      return null;
+    }
+    if (!string.IsNullOrWhiteSpace(piece.Parent) && !string.Equals(regionName, piece.Parent, StringComparison.OrdinalIgnoreCase))
+    {
+      var i = IndexOfName(baseline, regionName);
+      if (i >= 0)
+      {
+        var r = baseline.BaselineRegions[i];
+        try { r.Name = UniqueRegionName(baseline, piece.Parent!, r); return new Dictionary<string, object?> { ["name"] = r.Name, ["startStation"] = r.StartStation, ["endStation"] = r.EndStation, ["renamedOnly"] = true }; } catch { }
+      }
+    }
+    return null;
+  }
+
+  /// <summary>Applies a frequency written as "tangents/curves/spirals/profileCurves" (FrequencySignature) to a region.</summary>
+  private static bool TryApplyFrequencySignature(BaselineRegion region, string signature)
+  {
+    var parts = signature.Split('/');
+    if (parts.Length != 4) return false;
+    var v = new double[4];
+    for (var i = 0; i < 4; i++)
+      if (!double.TryParse(parts[i], NumberStyles.Float, CultureInfo.InvariantCulture, out v[i]) || v[i] <= 0) return false;
+    try
+    {
+      var s = region.AppliedAssemblySetting;
+      s.FrequencyAlongTangents = v[0]; s.FrequencyAlongCurves = v[1]; s.FrequencyAlongSpirals = v[2]; s.FrequencyAlongProfileCurves = v[3];
+      return true;
+    }
+    catch { return false; }
   }
 }
