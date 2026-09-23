@@ -58,6 +58,9 @@ public static partial class CorridorBowtieCommands
     if (levelRuleArg is not ("no_steeper" or "mean"))
       throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "levelRule must be no_steeper (default: no slope steeper than designed) or mean.");
     // recorded on the valley line so bowtie_unfix can put the region back later (bowtie_fix passes them)
+    // bowtie_fix isolates the clash range itself (possibly over two regions): it skips the one-region check
+    var skipRegionCheck = PluginRuntime.GetOptionalBool(parameters, "skipRegionCheck") ?? false;
+    var fixPieces = PluginRuntime.GetOptionalString(parameters, "fixPieces");
     var fixParent = PluginRuntime.GetOptionalString(parameters, "parentRegion");
     var fixAssembly = PluginRuntime.GetOptionalString(parameters, "parentAssembly");
     var fixBefore = PluginRuntime.GetOptionalString(parameters, "splitBefore");
@@ -127,6 +130,24 @@ public static partial class CorridorBowtieCommands
       if (unread.Count > 0)
         warnings.Add($"{unread.Count} applied station(s) in range have no {linkCode}-coded inside links and were left out ({string.Join(", ", unread.Take(6).Select(x => x.ToString("0.###")))}{(unread.Count > 6 ? ", ..." : "")}).");
 
+      // A neighbouring bend that is already repaired has clipped sections: they are no evidence for this bend, so the
+      // search range stops short of them. Only clipped sections inside this bend itself refuse the solve.
+      {
+        var inBend = clipped.Where(c => c >= startStation - StationTolerance && c <= endStation + StationTolerance).ToList();
+        var before = clipped.Where(c => c < startStation - StationTolerance).DefaultIfEmpty(double.NaN).Max();
+        var after = clipped.Where(c => c > endStation + StationTolerance).DefaultIfEmpty(double.NaN).Min();
+        if (inBend.Count == 0 && (!double.IsNaN(before) || !double.IsNaN(after)))
+        {
+          if (!double.IsNaN(before)) from = Math.Max(from, before + 0.001);
+          if (!double.IsNaN(after)) to = Math.Min(to, after - 0.001);
+          sections.RemoveAll(x => x.Station < from - StationTolerance || x.Station > to + StationTolerance);
+          warnings.Add($"A repaired neighbouring bend has clipped sections ({string.Join(", ", clipped.Take(4).Select(x => x.ToString("0.###")))}{(clipped.Count > 4 ? ", ..." : "")}): the search range is trimmed to {from:0.###}-{to:0.###}.");
+          clipped.Clear();
+          if (sections.Count < 2)
+            throw new JsonRpcDispatchException("CIVIL3D.INVALID_STATE", $"Between the repaired neighbouring bends there are fewer than two sections ({from:0.###}-{to:0.###}). Nothing was changed.");
+        }
+      }
+
       // ---------------------------------------------------------------- snapshot: daylight surface
       CivilSurface? surface; string? surfaceUsed;
       if (!string.IsNullOrWhiteSpace(surfaceName)) (surface, surfaceUsed) = FindSurface(civilDoc, transaction, surfaceName!);
@@ -190,8 +211,13 @@ public static partial class CorridorBowtieCommands
         if (result.LinkCrossingsAfter > 0) blocking.Add($"{result.LinkCrossingsAfter} link crossing(s) would remain after the clip");
         var wrong = result.Stations.Where(x => !x.FirstCrossingIsClip).Select(x => x.Station).ToList();
         if (wrong.Count > 0) blocking.Add($"{wrong.Count} section(s) would meet a clip line somewhere other than where they should stop ({string.Join(", ", wrong.Take(6).Select(x => x.ToString("0.###")))})");
-        if (result.MaxClosure > 0.02) blocking.Add($"the two sides differ by {result.MaxClosure:0.###} m in level along the seam");
-        if (region != null && result.ClipFrom.HasValue && (result.ClipFrom.Value < region.StartStation - StationTolerance || result.ClipTo!.Value > region.EndStation + StationTolerance))
+        // with the level taken from the valley line both sides end on its level, so a closure there is absorbed: reported
+        if (result.MaxClosure > 0.02)
+        {
+          if (levelFromTarget) warnings.Add($"The two sides differ by up to {result.MaxClosure:0.###} m in level at the valley line; both take its level (ClipElev), so the surface stays continuous.");
+          else blocking.Add($"the two sides differ by {result.MaxClosure:0.###} m in level along the seam");
+        }
+        if (!skipRegionCheck && region != null && result.ClipFrom.HasValue && (result.ClipFrom.Value < region.StartStation - StationTolerance || result.ClipTo!.Value > region.EndStation + StationTolerance))
           blocking.Add($"the sections to clip run {result.ClipFrom:0.###}-{result.ClipTo:0.###}, outside region '{region.Name}' ({region.StartStation:0.###}-{region.EndStation:0.###}): isolate that whole range first (region_isolate)");
       }
 
@@ -230,7 +256,7 @@ public static partial class CorridorBowtieCommands
           $"range={startStation.ToString("0.####", inv)}|{endStation.ToString("0.####", inv)}; step={step.ToString("0.####", inv)}; extension={extension.ToString("0.####", inv)}; " +
           $"capInset={capInset.ToString("0.####", inv)}; linkCode={linkCode}; surface={(surfaceUsed ?? "").Replace(";", ",")}; partner={partner.Replace(";", ",")}; " +
           $"stations={string.Join("|", addedList.Select(x => x.ToString("0.####", inv)))}; region={Clean(region?.Name)}; parent={Clean(fixParent)}; parentAssembly={Clean(fixAssembly)}; " +
-          $"before={Clean(fixBefore)}; after={Clean(fixAfter)}";
+          $"before={Clean(fixBefore)}; after={Clean(fixAfter)}; pieces={(fixPieces ?? "").Replace(";", ",").Replace("=", "-")}";
         // levels: the seam's own level at each point; the apex point and the apex bar at the level the arc sections arrive at
         double firstZ = result.Seam.Select(q => q.Z).FirstOrDefault(z => !double.IsNaN(z));
         var apexZ = result.ApexZ ?? firstZ;

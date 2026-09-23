@@ -643,6 +643,10 @@ public static partial class CorridorBowtieCommands
     var carrySurfaceTargets = PluginRuntime.GetOptionalBool(parameters, "carrySurfaceTargets") ?? true;
     var rebuild = PluginRuntime.GetOptionalBool(parameters, "rebuild") ?? true;
     var dryRun = PluginRuntime.GetOptionalBool(parameters, "dryRun") ?? false;
+    // parent assembly name -> assembly to give that part (a clash range over two regions with different assemblies)
+    var assemblyMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    if (PluginRuntime.GetParameter(parameters, "assemblyMap") is JsonObject mapNode)
+      foreach (var kv in mapNode) if (kv.Value is JsonValue v && v.TryGetValue<string>(out var target) && !string.IsNullOrWhiteSpace(target)) assemblyMap[kv.Key] = target;
     var rangesNode = PluginRuntime.GetParameter(parameters, "ranges") as JsonArray
       ?? throw new JsonRpcDispatchException("CIVIL3D.INVALID_INPUT", "ranges array is required: [{startStation, endStation, name?}] (use bowtie_predict's splitPlan).");
     if (frequency is <= 0)
@@ -729,6 +733,9 @@ public static partial class CorridorBowtieCommands
           var parentTargets = TargetSignature(region, transaction);
           var parentFrequency = FrequencySignature(region);
           var parentAssembly = SafeAssemblyId(region);
+          var parentAssemblyName = AssemblyName(transaction, parentAssembly);
+          var partAssemblyId = assemblyId;
+          if (parentAssemblyName != null && assemblyMap.TryGetValue(parentAssemblyName, out var mapped)) partAssemblyId = FindAssemblyId(civilDoc, transaction, mapped);
 
           BaselineRegion mid = region;
           BaselineRegion? tail = null;
@@ -768,7 +775,7 @@ public static partial class CorridorBowtieCommands
           var afterName = tail?.Name ?? "";
 
           var carried = new List<string>();
-          if (assemblyId.HasValue)
+          if (partAssemblyId.HasValue)
           {
             // A new assembly drops every target of the region. Its surface targets are given the parent's surface straight
             // away, in this same transaction, so the region is never rebuilt with "Surface target is not specified".
@@ -782,7 +789,7 @@ public static partial class CorridorBowtieCommands
             }
             catch (Exception ex) { PluginLog.Debug("Bowtie", "Parent targets not readable", ex); }
 
-            mid.AssemblyId = assemblyId.Value;
+            mid.AssemblyId = partAssemblyId.Value;
 
             if (carrySurfaceTargets && parentSurfaces != null)
             {
@@ -815,6 +822,9 @@ public static partial class CorridorBowtieCommands
             ["startStation"] = mid.StartStation,
             ["endStation"] = mid.EndStation,
             ["fromRegion"] = parentName,
+            ["parentAssemblyName"] = parentAssemblyName,
+            ["regionBefore"] = splitStart ? beforeName : null,
+            ["regionAfter"] = afterName.Length > 0 ? afterName : null,
             ["splitAtStart"] = splitStart,
             ["splitAtEnd"] = splitEnd,
             ["splitKeptFromParent"] = kept.Count > 0 ? kept : null,

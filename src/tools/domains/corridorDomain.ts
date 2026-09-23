@@ -454,6 +454,7 @@ const CorridorBowtieFixArgsSchema = CorridorBowtieSeamArgsSchema.extend({
   padding: z.number().nonnegative().optional(),
   minTurnDegrees: z.number().nonnegative().optional(),
   keepOnFailure: z.boolean().optional(),
+  assemblyMap: z.record(z.string()).optional(),
   parentRegion: z.string().optional(),
   parentAssembly: z.string().optional(),
   splitBefore: z.string().optional(),
@@ -669,6 +670,7 @@ const canonicalCorridorInputShape = {
   levelRule: z.enum(["no_steeper", "mean"]).optional().describe("bowtie_seam / bowtie_fix: the valley level where the two sides differ - no_steeper (default: a side in cut is only lowered, in fill only raised, so no slope comes out steeper than designed; the mean where no such level exists, flagged) or mean (halfway)."),
   clipAssembly: z.string().optional().describe("bowtie_seam: the clip assembly the region will get (for adjustFrom auto); bowtie_fix fills it from assemblyName."),
   keepOnFailure: z.boolean().optional().describe("bowtie_fix: leave a repair that fails part-way in the drawing for inspection (default false: every change made for that bend is rolled back with bowtie_unfix)."),
+  assemblyMap: z.record(z.string()).optional().describe("bowtie_fix: clip assembly per parent assembly, e.g. {\"MD302 Drain 3.3\": \"MD302 Drain 3.3 LDC04\", \"MD303 Drain 3.6\": \"MD303 Drain 3.6 LDC04\"} - for a clash range that spans regions with different assemblies (each piece gets its own). Parent assemblies not listed fall back to assemblyName."),
   merge: z.boolean().optional().describe("bowtie_unfix: merge the region back with the pieces it was cut from (default true)."),
   restoreAssembly: z.boolean().optional().describe("bowtie_unfix: give the region back the assembly it had before the repair (default true)."),
 };
@@ -723,6 +725,8 @@ function bowtieSeamParams(args: CorridorRawArgs, dryRun: boolean) {
     adjustFrom: args.adjustFrom ?? null,
     levelRule: args.levelRule ?? null,
     clipAssembly: args.clipAssembly ?? null,
+    skipRegionCheck: args.skipRegionCheck ?? null,
+    fixPieces: args.fixPieces ?? null,
     parentRegion: args.parentRegion ?? null,
     parentAssembly: args.parentAssembly ?? null,
     splitBefore: args.splitBefore ?? null,
@@ -1380,7 +1384,7 @@ export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
           if (bend.repaired) return out("skipped", `Region '${bend.region}' already carries a valley repair (mapped ClipTarget): refresh it with bowtie_refresh, or undo it with bowtie_unfix first.`);
 
           // 1. solve on the sections as built (read-only)
-          const pre = await call("bowtieSeam", bowtieSeamParams({ ...bendArgs, snapshotPath: null }, true));
+          const pre = await call("bowtieSeam", bowtieSeamParams({ ...bendArgs, snapshotPath: null, skipRegionCheck: true }, true));
           if (!pre.ok) {
             const already = /already clipped/i.test(pre.error);
             return out(already ? "skipped" : "failed", already ? "Sections in range are already clipped: this bend is already repaired." : `Could not be solved: ${pre.error}. Nothing was changed.`);
@@ -1395,74 +1399,98 @@ export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
           if (meet.length !== 2 || meet.some((m) => typeof m !== "number")) return out("refused", "The solver gave no meet stations. Nothing was changed.");
           const pad = Number(args.padding ?? 2);
           const region = preview.region as { name: string; start: number; end: number; assemblyName?: string | null };
-          const from = Math.max(region.start, Math.floor(Math.min(meet[0], preview.result.clipFrom ?? meet[0]) - pad));
-          const to = Math.min(region.end, Math.ceil(Math.max(meet[1], preview.result.clipTo ?? meet[1]) + pad));
+          // the clash range may run past the region at the apex (a bend on a region boundary): the isolation splits it by region
+          const from = Math.floor(Math.min(meet[0], preview.result.clipFrom ?? meet[0]) - pad);
+          const to = Math.ceil(Math.max(meet[1], preview.result.clipTo ?? meet[1]) + pad);
+          const apexStation = Number(preview.result?.apex?.station ?? 0.5 * (from + to));
+          const assemblyMap = (args.assemblyMap ?? null) as Record<string, string> | null;
 
-          // 2. own region for the clash range; a different assembly gets the parent's surface targets in the same transaction
-          const swapping = typeof args.assemblyName === "string" && args.assemblyName.length > 0;
+          // 2. own region(s) for the clash range; a different assembly gets the parent's surface targets in the same transaction
+          const swapping = (typeof args.assemblyName === "string" && args.assemblyName.length > 0) || (assemblyMap !== null && Object.keys(assemblyMap).length > 0);
           const alreadyIsolated = Math.abs(region.start - from) < 0.011 && Math.abs(region.end - to) < 0.011;
-          const ctx = { parentRegion: region.name, parentAssembly: region.assemblyName ?? null, splitBefore: null as string | null, splitAfter: null as string | null };
-          let regionName = region.name;
+          type Piece = { name: string; start: number; end: number; parentRegion: string | null; parentAssembly: string | null; splitBefore: string | null; splitAfter: string | null };
+          let pieces: Piece[] = [{ name: region.name, start: region.start, end: region.end, parentRegion: null, parentAssembly: null, splitBefore: null, splitAfter: null }];
           let changed = false;
           const rollback = async (stage: string, message: string) => {
             if (!changed || args.keepOnFailure === true) return out("failed", `${message}${changed ? " The changes for this bend were left in the drawing (keepOnFailure)." : " Nothing was changed."}`, { failedAt: stage });
-            const undo = await call("bowtieUnfix", { corridorName: args.name, baselineIndex, regionName, merge: true, restoreAssembly: true, rebuild: true, dryRun: false, ...ctx });
-            stages.rollback = undo.ok ? { targetsCleared: undo.value?.targetsCleared, valleyLinesErased: undo.value?.valleyLinesErased, stationsDeleted: undo.value?.stationsDeleted, assemblyRestored: undo.value?.assemblyRestored, merged: undo.value?.merged, rebuildError: undo.value?.rebuildError, warnings: undo.value?.warnings } : { error: undo.error };
-            return out(undo.ok ? "rolled_back" : "failed", `${message} ${undo.ok ? "Every change made for this bend was undone (see stages.rollback)." : `The roll-back failed too: ${undo.error}. Check region '${regionName}' by hand (bowtie_unfix).`}`, { failedAt: stage });
+            const undone: any[] = []; let ok = true;
+            for (const p of [...pieces].sort((a, b) => b.start - a.start)) {
+              const undo = await call("bowtieUnfix", {
+                corridorName: args.name, baselineIndex, regionName: p.name, merge: true, restoreAssembly: true, rebuild: true, dryRun: false,
+                parentRegion: p.parentRegion, parentAssembly: p.parentAssembly, splitBefore: p.splitBefore, splitAfter: p.splitAfter,
+              });
+              ok = ok && undo.ok;
+              undone.push(undo.ok ? { region: p.name, targetsCleared: undo.value?.targetsCleared, valleyLinesErased: undo.value?.valleyLinesErased, stationsDeleted: undo.value?.stationsDeleted, assemblyRestored: undo.value?.assemblyRestored, merged: undo.value?.merged, rebuildError: undo.value?.rebuildError, warnings: undo.value?.warnings } : { region: p.name, error: undo.error });
+            }
+            stages.rollback = undone;
+            return out(ok ? "rolled_back" : "failed", `${message} ${ok ? "Every change made for this bend was undone (see stages.rollback)." : `The roll-back failed in part: check ${pieces.map((p) => `'${p.name}'`).join(", ")} by hand (bowtie_unfix).`}`, { failedAt: stage });
           };
           if (!alreadyIsolated || swapping) {
             const iso = await call("isolateCorridorRanges", {
               corridorName: args.name, baselineIndex,
               ranges: [{ startStation: from, endStation: to, ...(args.regionName && bends.length === 1 ? { name: args.regionName } : {}) }],
-              namePrefix: "BT", frequency: null, assemblyName: swapping ? args.assemblyName : null,
-              matchParent: true, carrySurfaceTargets: true, dryRun: false, rebuild: swapping,
+              namePrefix: "BT", frequency: null, assemblyName: typeof args.assemblyName === "string" && args.assemblyName.length > 0 ? args.assemblyName : null,
+              assemblyMap, matchParent: true, carrySurfaceTargets: true, dryRun: false, rebuild: swapping,
             });
             if (!iso.ok) return out("failed", `The region could not be isolated: ${iso.error}. Nothing was changed.`, { failedAt: "isolate" });
             const isolated = iso.value;
-            const piece = isolated?.isolated?.[0];
-            changed = !!piece;
-            regionName = piece?.name ?? regionName;
-            const undoRow = (isolated?.undo ?? [])[0];
-            const pieces = (undoRow?.regions ?? []) as string[];
-            if (piece?.splitAtStart && pieces.length > 1) ctx.splitBefore = pieces[0];
-            if (piece?.splitAtEnd && pieces.length > 1) ctx.splitAfter = pieces[pieces.length - 1];
-            stages.isolate = { isolated: isolated?.isolated, rebuilt: isolated?.rebuilt, rebuildError: isolated?.rebuildError };
-            if (!piece) return out("failed", `Nothing was isolated for ${from}-${to} (${JSON.stringify(isolated?.skipped ?? [])}).`, { failedAt: "isolate" });
+            const made = (isolated?.isolated ?? []) as any[];
+            stages.isolate = { isolated: made, skipped: isolated?.skipped, rebuilt: isolated?.rebuilt, rebuildError: isolated?.rebuildError };
+            if (made.length === 0) return out("failed", `Nothing was isolated for ${from}-${to} (${JSON.stringify(isolated?.skipped ?? [])}).`, { failedAt: "isolate" });
+            changed = true;
+            pieces = made.map((m) => ({ name: String(m.name), start: Number(m.startStation), end: Number(m.endStation), parentRegion: m.fromRegion ?? null,
+              parentAssembly: m.parentAssemblyName ?? null, splitBefore: m.regionBefore ?? null, splitAfter: m.regionAfter ?? null }));
             if (isolated?.rebuildError) return await rollback("isolate", `The region was isolated but the rebuild failed: ${isolated.rebuildError}.`);
           }
+          const apexPiece = pieces.find((p) => apexStation >= p.start - 0.011 && apexStation <= p.end + 0.011) ?? pieces[0];
 
-          // 3. the inside clip subassembly
+          // 3. the inside clip subassembly of every piece
           const mapping = await call("getCorridorTargetMappings", { corridorName: args.name, regionIndex: null, baselineIndex });
           if (!mapping.ok) return await rollback("subassembly", `The targets could not be read: ${mapping.error}.`);
-          const reg = (mapping.value?.regions ?? []).find((r: any) => r.regionName === regionName);
-          const clipSubs = [...new Set(((reg?.targets ?? []) as any[]).filter((t) => t.parameterName === "ClipTarget").map((t) => String(t.subassemblyName)))];
           const sideRe = side === "left" ? /(^|[\s_\-])(l|left)$/i : /(^|[\s_\-])(r|right)$/i;
-          const bySide = clipSubs.filter((n) => sideRe.test(n));
-          const sub = typeof args.subassemblyName === "string" && args.subassemblyName.length > 0 ? args.subassemblyName : (bySide.length === 1 ? bySide[0] : null);
-          stages.clipSubassemblies = clipSubs;
-          if (!sub || !clipSubs.includes(sub))
-            return await rollback("subassembly", `Region '${regionName}' has no unambiguous clip subassembly for the ${side} side (found: ${clipSubs.join(", ") || "none with a ClipTarget"}); pass subassemblyName, or assemblyName for an assembly that has one.`);
-          const hasElev = ((reg?.targets ?? []) as any[]).some((t) => t.parameterName === "ClipElev" && t.subassemblyName === sub);
+          const subs: { piece: Piece; sub: string; hasElev: boolean }[] = [];
+          for (const p of pieces) {
+            const reg = (mapping.value?.regions ?? []).find((r: any) => r.regionName === p.name);
+            const clipSubs = [...new Set(((reg?.targets ?? []) as any[]).filter((t) => t.parameterName === "ClipTarget").map((t) => String(t.subassemblyName)))];
+            const bySide = clipSubs.filter((n) => sideRe.test(n));
+            const sub = typeof args.subassemblyName === "string" && args.subassemblyName.length > 0 && clipSubs.includes(args.subassemblyName) ? args.subassemblyName : (bySide.length === 1 ? bySide[0] : null);
+            if (!sub)
+              return await rollback("subassembly", `Region '${p.name}' has no unambiguous clip subassembly for the ${side} side (found: ${clipSubs.join(", ") || "none with a ClipTarget"}); pass subassemblyName, or assemblyName / assemblyMap for an assembly that has one.`);
+            subs.push({ piece: p, sub, hasElev: ((reg?.targets ?? []) as any[]).some((t) => t.parameterName === "ClipElev" && t.subassemblyName === sub) });
+          }
+          stages.clipSubassemblies = subs.map((x) => ({ region: x.piece.name, subassembly: x.sub, clipElev: x.hasElev }));
+          const hasElev = subs.every((x) => x.hasElev);
 
-          // 4. the valley lines (after a swap: solved again on the clip assembly's own, still unclipped, sections)
-          const seamRes = await call("bowtieSeam", bowtieSeamParams({ ...bendArgs, ...ctx, levelFromTarget: args.levelFromTarget ?? hasElev }, false));
+          // 4. the valley lines (after a swap: solved again on the clip assemblies' own, still unclipped, sections); the
+          //    context of every piece is recorded on them so bowtie_unfix can put each region back later
+          const fixPieces = pieces.map((p) => [p.name, p.parentRegion ?? "", p.parentAssembly ?? "", p.splitBefore ?? "", p.splitAfter ?? ""].join("~")).join("|");
+          const seamRes = await call("bowtieSeam", bowtieSeamParams({
+            ...bendArgs, skipRegionCheck: true, fixPieces,
+            parentRegion: apexPiece.parentRegion, parentAssembly: apexPiece.parentAssembly, splitBefore: apexPiece.splitBefore, splitAfter: apexPiece.splitAfter,
+            levelFromTarget: args.levelFromTarget ?? hasElev,
+          }, false));
           if (!seamRes.ok) return await rollback("seam", `The valley lines could not be written: ${seamRes.error}.`);
           const seam = seamRes.value;
-          stages.seam = { status: seam?.result?.status, blocking: seam?.blocking, written: seam?.written, stationsAdded: seam?.stationsAdded, checks: seam?.result?.checks, warnings: seam?.warnings };
+          stages.seam = { status: seam?.result?.status, blocking: seam?.blocking, written: seam?.written, stationsAdded: seam?.stationsAdded, checks: seam?.result?.checks, warnings: seam?.warnings, adjustFrom: seam?.adjustFrom, levelRule: seam?.levelRule };
           const written = (seam?.written ?? []) as any[];
           if (written.length === 0) return await rollback("seam", "No valley line was written (see stages.seam).");
           changed = true;
           const names = written.map((w) => String(w.name));
           const kind = written[0].type === "alignment" ? "alignment" : "feature_line";
 
-          // 5. map and rebuild once
-          const targets: any[] = [{ parameterName: "ClipTarget", subassemblyName: sub, targetType: kind, targetName: names[0], targetNames: names.slice(1), targetToOption: "Nearest" }];
-          if (hasElev && kind === "feature_line")
-            targets.push({ parameterName: "ClipElev", subassemblyName: sub, targetType: kind, targetName: names[0], targetNames: names.slice(1), targetToOption: "Nearest" });
-          const mapped = await call("setCorridorTargetMappings", { corridorName: args.name, regionName, baselineIndex, targets, rebuild: true });
-          if (!mapped.ok) return await rollback("map", `The targets could not be mapped: ${mapped.error}.`);
-          stages.map = { region: regionName, subassembly: sub, applied: mapped.value?.applied, rebuilt: mapped.value?.rebuilt, rebuildError: mapped.value?.rebuildError };
-          if (mapped.value?.rebuildError) return await rollback("map", `Targets were mapped but the rebuild failed: ${mapped.value.rebuildError}.`);
+          // 5. map on every piece, rebuild once (with the last)
+          const maps: any[] = [];
+          for (let k = 0; k < subs.length; k++) {
+            const { piece, sub } = subs[k];
+            const targets: any[] = [{ parameterName: "ClipTarget", subassemblyName: sub, targetType: kind, targetName: names[0], targetNames: names.slice(1), targetToOption: "Nearest" }];
+            if (hasElev && kind === "feature_line")
+              targets.push({ parameterName: "ClipElev", subassemblyName: sub, targetType: kind, targetName: names[0], targetNames: names.slice(1), targetToOption: "Nearest" });
+            const mapped = await call("setCorridorTargetMappings", { corridorName: args.name, regionName: piece.name, baselineIndex, targets, rebuild: k === subs.length - 1 });
+            if (!mapped.ok) return await rollback("map", `The targets of '${piece.name}' could not be mapped: ${mapped.error}.`);
+            maps.push({ region: piece.name, subassembly: sub, applied: mapped.value?.applied, rebuilt: mapped.value?.rebuilt, rebuildError: mapped.value?.rebuildError });
+            if (mapped.value?.rebuildError) { stages.map = maps; return await rollback("map", `Targets were mapped but the rebuild failed: ${mapped.value.rebuildError}.`); }
+          }
+          stages.map = maps;
 
           // 6. verify on the built corridor
           const check = await call("checkCorridorBowties", {
@@ -1472,8 +1500,9 @@ export const CORRIDOR_DOMAIN_DEFINITION: DomainToolDefinition = {
           if (!check.ok) return await rollback("check", `The result could not be checked: ${check.error}.`);
           stages.check = check.value;
           if (check.value?.clean !== true) return await rollback("check", "The repair was applied but the built corridor still shows crossings or loops (see stages.check).");
-          return out("repaired", `Bend ${from}-${to} (${side}) repaired in region '${regionName}': no link crossings, no daylight loops.`,
-            { region: regionName, valleyLines: names, highlight: seam?.highlight ?? preview?.highlight ?? null, levelMove: seam?.result?.checks?.maxLevelAdjust ?? null, slopeChange: seam?.result?.checks?.maxSlopeChange ?? null });
+          const regionNames = pieces.map((p) => p.name);
+          return out("repaired", `Bend ${from}-${to} (${side}) repaired in ${regionNames.length > 1 ? "regions" : "region"} ${regionNames.map((n) => `'${n}'`).join(" + ")}: no link crossings, no daylight loops.`,
+            { regions: regionNames, valleyLines: names, highlight: seam?.highlight ?? preview?.highlight ?? null, levelMove: seam?.result?.checks?.maxLevelAdjust ?? null, slopeChange: seam?.result?.checks?.maxSlopeChange ?? null });
         };
 
         const results: any[] = [];

@@ -203,6 +203,14 @@ public static partial class CorridorBowtieCommands
         }
         toErase.Add((id, name, obj is FeatureLine ? "feature_line" : "alignment"));
       }
+      // a repair over two regions records each piece: "region~parent~parentAssembly~before~after|..."
+      if (record.TryGetValue("pieces", out var piecesText) && piecesText.Length > 0)
+        foreach (var piece in piecesText.Split('|', StringSplitOptions.RemoveEmptyEntries))
+        {
+          var f = piece.Split('~');
+          if (f.Length < 5 || !string.Equals(f[0].Trim(), region.Name, StringComparison.OrdinalIgnoreCase)) continue;
+          record["parent"] = f[1].Trim(); record["parentAssembly"] = f[2].Trim(); record["before"] = f[3].Trim(); record["after"] = f[4].Trim();
+        }
       string? Rec(string key, string? given) => !string.IsNullOrWhiteSpace(given) ? given : record.TryGetValue(key, out var v) && v.Length > 0 ? v : null;
       var parent = Rec("parent", ctxParent);
       var parentAssembly = Rec("parentAssembly", ctxAssembly);
@@ -224,12 +232,33 @@ public static partial class CorridorBowtieCommands
         return new Dictionary<string, object?> { ["corridorName"] = corridor.Name, ["regionName"] = region.Name, ["dryRun"] = true, ["plan"] = plan, ["warnings"] = warnings };
 
       // ---- 1. clear the clip targets BEFORE erasing the objects on them (a target left pointing at an erased object
-      //         empties the whole region on the next rebuild)
+      //         empties the whole region on the next rebuild) - in this region, and in any other region that maps the same
+      //         valley lines (a repair over two regions shares them)
       if (cleared.Count > 0)
       {
         for (var i = 0; i < infos.Count; i++)
           if (infos[i].LogicalName is "ClipTarget" or "ClipElev") infos[i].TargetIds = new ObjectIdCollection();
         region.SetTargets(infos);
+      }
+      var erasing = new HashSet<ObjectId>(toErase.Select(x => x.Id));
+      var regionsAll = baseline.BaselineRegions;
+      for (var ri = 0; ri < regionsAll.Count; ri++)
+      {
+        var other = regionsAll[ri];
+        if (string.Equals(other.Name, region.Name, StringComparison.OrdinalIgnoreCase)) continue;
+        SubassemblyTargetInfoCollection oi;
+        try { oi = other.GetTargets(); } catch { continue; }
+        var touched = false;
+        for (var i = 0; i < oi.Count; i++)
+        {
+          var ids = oi[i].TargetIds;
+          if (ids.Count == 0 || !ids.Cast<ObjectId>().Any(erasing.Contains)) continue;
+          var keep = new ObjectIdCollection();
+          foreach (ObjectId id in ids) if (!erasing.Contains(id)) keep.Add(id);
+          oi[i].TargetIds = keep; touched = true;
+          cleared.Add($"{other.Name}/{oi[i].SubassemblyName}:{oi[i].LogicalName}");
+        }
+        if (touched) other.SetTargets(oi);
       }
       // ---- 2. the valley lines
       var erased = new List<string>();
