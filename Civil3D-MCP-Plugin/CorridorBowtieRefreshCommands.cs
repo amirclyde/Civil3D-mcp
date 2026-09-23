@@ -140,6 +140,20 @@ public static partial class CorridorBowtieCommands
       // ---------------------------------------------------------------- 2. unmap, rebuild: unclipped sections
       var allMappings = groups.SelectMany(g => g.Mappings).ToList();
       SetMappings(baseline, allMappings, m => new List<ObjectId>());
+      // the meet stations a repair added are sections placed by its own solve: solved again with them the answer shifts a
+      // little each time. They come out for the solve, as they were not there when the repair was made, and go back in
+      // (the old ones, or the new ones for a refreshed repair) before the corridor is rebuilt for good.
+      foreach (var g in groups)
+      {
+        g.OldStations = ParseStationList(g.Record.GetValueOrDefault("stations"));
+        foreach (var st in g.OldStations)
+        {
+          var holder = RegionHoldingStation(baseline, st);
+          if (holder == null) { g.Warnings.Add($"The recorded meet station {st:0.###} is no longer an added station."); continue; }
+          try { holder.Value.Region.DeleteStation(holder.Value.Station); g.DeletedStations.Add((holder.Value.Station, holder.Value.Region.Name)); }
+          catch (Exception ex) { g.Warnings.Add($"Meet station {st:0.###} could not be taken out for the solve: {ex.Message}"); }
+        }
+      }
       var rebuildError = TryRebuild(corridor);
       if (rebuildError != null)
         throw new JsonRpcDispatchException("CIVIL3D.API_ERROR", $"The corridor could not be rebuilt with the valley lines unmapped: {rebuildError}. Nothing was changed.");
@@ -210,7 +224,7 @@ public static partial class CorridorBowtieCommands
         if (blocking.Count > 0)
         {
           g.Outcome = "refused"; g.Reasons = blocking;
-          g.Message = $"Refused on the design as it now is: {string.Join("; ", blocking)}. The old valley line is kept.";
+          g.Message = $"Refused on the design as it now is: {string.Join("; ", blocking.Select(b => b.TrimEnd('.')))}. The old valley line is kept.";
           continue;
         }
         (g.NewSeam, g.NewCap) = SeamLinePoints(r);
@@ -230,7 +244,6 @@ public static partial class CorridorBowtieCommands
           }
           else plan = double.PositiveInfinity;   // a cap appears or goes
         }
-        g.OldStations = ParseStationList(g.Record.GetValueOrDefault("stations"));
         g.NewStations = new[] { r.MeetA, r.MeetB }.Where(x => x.HasValue).Select(x => x!.Value).OrderBy(x => x).ToList();
         var shift = g.OldStations.Count == g.NewStations.Count
           ? g.OldStations.OrderBy(x => x).Zip(g.NewStations, (a, b) => Math.Abs(a - b)).DefaultIfEmpty(0).Max()
@@ -258,14 +271,7 @@ public static partial class CorridorBowtieCommands
           oldCap.Name = UniqueFeatureLineName(civilDoc, database, transaction, $"{g.CapName} (before refresh)");
         }
         var inv = CultureInfo.InvariantCulture;
-        // meet stations: the old ones out of whichever region holds them, the new ones in
-        foreach (var st in g.OldStations)
-        {
-          var holder = RegionHoldingStation(baseline, st);
-          if (holder == null) { g.Warnings.Add($"The recorded meet station {st:0.###} is no longer an added station."); continue; }
-          try { holder.Value.Region.DeleteStation(holder.Value.Station); g.DeletedStations.Add((holder.Value.Station, holder.Value.Region.Name)); }
-          catch (Exception ex) { g.Warnings.Add($"Meet station {st:0.###} could not be removed: {ex.Message}"); }
-        }
+        // meet stations: the old ones are out already (step 2), the new ones go in
         var applied = Stations();
         var ignore = g.DeletedStations.Select(x => x.Station).ToArray();
         foreach (var (st, leg) in new[] { (g.Result!.MeetA, "incoming"), (g.Result!.MeetB, "outgoing") })
@@ -288,6 +294,9 @@ public static partial class CorridorBowtieCommands
           g.NewCapId = capFl.ObjectId;
         }
       }
+
+      // the repairs that keep their valley line get their own meet stations back
+      foreach (var g in groups.Where(x => !x.Update)) PutBackStations(baseline, g);
 
       // ---------------------------------------------------------------- 5. map back, rebuild, check
       List<ObjectId> Remapped(SeamMapping m, bool useNew)
@@ -315,12 +324,8 @@ public static partial class CorridorBowtieCommands
             var holder = RegionHoldingStation(baseline, st);
             if (holder != null) try { holder.Value.Region.DeleteStation(holder.Value.Station); } catch { }
           }
-          var applied = Stations();
-          foreach (var (st, reg) in g.DeletedStations)
-          {
-            var ri = IndexOfName(baseline, reg);
-            if (ri >= 0) try { baseline.BaselineRegions[ri].AddStation(st, "Bowtie valley meets daylight"); } catch (Exception ex) { g.Warnings.Add($"Meet station {st:0.###} could not be put back: {ex.Message}"); }
-          }
+          g.AddedStations.Clear();
+          PutBackStations(baseline, g);
           foreach (var id in new[] { g.NewSeamId, g.NewCapId }.Where(x => x.HasValue))
             try { transaction.GetObject(id!.Value, OpenMode.ForWrite).Erase(); } catch { }
           CivilObjectUtils.GetRequiredObject<FeatureLine>(transaction, g.SeamId, OpenMode.ForWrite).Name = g.SeamName;
@@ -393,6 +398,18 @@ public static partial class CorridorBowtieCommands
   }
 
   private static K.P3 P(Point3d p) => new(p.X, p.Y, p.Z);
+
+  /// <summary>Puts the meet stations taken out for the solve back into the regions that held them.</summary>
+  private static void PutBackStations(Baseline baseline, SeamGroup g)
+  {
+    foreach (var (st, reg) in g.DeletedStations)
+    {
+      var ri = IndexOfName(baseline, reg);
+      if (ri < 0) { g.Warnings.Add($"Meet station {st:0.###} could not be put back: region '{reg}' is gone."); continue; }
+      try { baseline.BaselineRegions[ri].AddStation(st, "Bowtie valley meets daylight"); }
+      catch (Exception ex) { g.Warnings.Add($"Meet station {st:0.###} could not be put back: {ex.Message}"); }
+    }
+  }
   private static double? Round(double? v) => v.HasValue ? (double.IsInfinity(v.Value) ? null : Math.Round(v.Value, 4)) : null;
 
   private static List<Point3d> FeatureLinePoints(Transaction transaction, ObjectId id)

@@ -173,6 +173,14 @@ public sealed class SeamResult
 /// </summary>
 public static class SeamSolver
 {
+  /// <summary>Which pairs of sections (by index into 'stations') are this bend's: on the two sides of its apex, or with one
+  /// of them inside [zoneFrom, zoneTo].</summary>
+  public static Func<int, int, bool> OwnPair(IReadOnlyList<double> stations, double apex, double zoneFrom, double zoneTo)
+  {
+    bool In(double s) => s >= zoneFrom - 1e-6 && s <= zoneTo + 1e-6;
+    return (i, j) => (stations[i] < apex) != (stations[j] < apex) || In(stations[i]) || In(stations[j]);
+  }
+
   public static SeamResult Solve(SampledBaseline bl, SectionSet sections, Func<double, double, double?>? ground,
     double bendFrom, double bendTo, SolveOptions? options = null, double? searchFrom = null, double? searchTo = null)
   {
@@ -339,13 +347,16 @@ public static class SeamSolver
     // ---------------------------------------------------------------- is there a bowtie at all?
     {
       var segs = new List<(P2, P2)>();
+      var at = new List<double>();
       for (var s = lo; s <= hi + 1e-9; s += opt.DenseSpacing)
       {
         if (bl.Corners.Any(c => Math.Abs(c.Station - s) < 1e-6)) continue;
         var (c, th) = bl.At(s);
         segs.Add((c, c + SampledBaseline.InsideNormal(th, side) * For(s).Reach(s)));
+        at.Add(s);
       }
-      if (Geometry.CountCrossings(segs, opt.CrossingTolerance) == 0)
+      // only this bend's crossings: another bend in the window crosses its own sections, not these
+      if (Geometry.CountCrossings(segs, opt.CrossingTolerance, OwnPair(at, sApex, bendFrom, bendTo)) == 0)
       { r.Status = SeamStatus.NoBowtie; r.Reasons.Add("No inside section crosses another at its natural daylight: there is nothing to clip."); return r; }
     }
 
@@ -998,8 +1009,12 @@ public static class SeamSolver
       r.Warnings.Add($"Next to the apex the sections arrive at levels up to {Math.Max(r.ApexMismatch, r.ApexSpread):0.##} m apart (a grade along the bend, or a cut slope beside a fill slope): the small patch there will not be a clean surface and wants a look.");
     // ---------------------------------------------------------------- do the links still cross in plan?
     var live = r.Stations.Where(x => x.Role != "corner").ToList();
-    r.LinkCrossingsBefore = Geometry.CountCrossings(live.Select(x => { var (c, nrm) = Frame(x.Station); return (c, c + nrm * x.Reach); }).ToList(), opt.CrossingTolerance);
-    r.LinkCrossingsAfter = Geometry.CountCrossings(live.Select(x => { var (c, nrm) = Frame(x.Station); return (c, c + nrm * (x.ClipOffset ?? x.Reach)); }).ToList(), opt.CrossingTolerance);
+    // counted: pairs of sections on the two sides of this apex, or with one of them in this bend's clip range. Two sections
+    // that cross each other beside another bend in the window (both on one side of this apex, both outside the clip) are
+    // that bend's bowtie, not this one's.
+    var own = OwnPair(live.Select(x => x.Station).ToList(), r.ApexStation, r.ClipFrom ?? bendFrom, r.ClipTo ?? bendTo);
+    r.LinkCrossingsBefore = Geometry.CountCrossings(live.Select(x => { var (c, nrm) = Frame(x.Station); return (c, c + nrm * x.Reach); }).ToList(), opt.CrossingTolerance, own);
+    r.LinkCrossingsAfter = Geometry.CountCrossings(live.Select(x => { var (c, nrm) = Frame(x.Station); return (c, c + nrm * (x.ClipOffset ?? x.Reach)); }).ToList(), opt.CrossingTolerance, own);
     // a result is only Ok when it does the job: never with crossings left or with a section folding past its own centre
     if (r.Status == SeamStatus.Ok)
     {
@@ -1084,12 +1099,16 @@ public static class Geometry
   }
 
   /// <summary>Pairs of segments that cross properly, i.e. more than 'tol' from every segment end.</summary>
-  public static int CountCrossings(IReadOnlyList<(P2 A, P2 B)> segs, double tol)
+  public static int CountCrossings(IReadOnlyList<(P2 A, P2 B)> segs, double tol) => CountCrossings(segs, tol, null);
+
+  /// <summary>As above, counting only the pairs 'pair' accepts (by index).</summary>
+  public static int CountCrossings(IReadOnlyList<(P2 A, P2 B)> segs, double tol, Func<int, int, bool>? pair)
   {
     var count = 0;
     for (var i = 0; i < segs.Count; i++)
       for (var j = i + 1; j < segs.Count; j++)
       {
+        if (pair != null && !pair(i, j)) continue;
         var (a, b) = segs[i]; var (c, d) = segs[j];
         var e = b - a; var f = d - c;
         var den = e.Cross(f);

@@ -754,6 +754,29 @@ Test("snapshot round trip: save, load, solve - the same seam to the millimetre",
 });
 
 
+
+Test("two bends on the same side 35 m apart: each is solved on its own; the other bend's loop is not counted as this one's", () =>
+{
+  // PI1 at 130 (left 30 deg), PI2 at 165 (left 25 deg): each inside reach ~11 m, so each loops, and each lies well inside the
+  // other's 60 m search window
+  var a0 = 10 * Deg; var a1 = a0 + 30 * Deg; var a2 = a1 + 25 * Deg;
+  var p0 = new P2(0, 0); var p1 = p0 + SampledBaseline.Tangent(a0) * 30; var p2 = p1 + SampledBaseline.Tangent(a1) * 35; var p3 = p2 + SampledBaseline.Tangent(a2) * 60;
+  var bl = SampledBaseline.FromPolyline(new[] { p0, p1, p2, p3 }, 100.0);
+  var sec = MakeSections(bl, Side.Left, Every(100, 225, 1), _ => 10, (_, _) => 6);
+  var first = SeamSolver.Solve(bl, sec, (_, _) => 6, 129, 131);
+  var second = SeamSolver.Solve(bl, sec, (_, _) => 6, 164, 166);
+  Healthy(first); Healthy(second);
+  True(Math.Abs(first.ApexStation - 130) < 0.01 && Math.Abs(second.ApexStation - 165) < 0.01, "apexes");
+  // the same bend solved in a window that stops short of the other bend: the same answer
+  var alone = SeamSolver.Solve(bl, sec, (_, _) => 6, 129, 131, null, 100, 147);
+  Near(first.MeetA!.Value, alone.MeetA!.Value, 1e-6, "meet A with / without the other bend in the window");
+  Near(first.MeetB!.Value, alone.MeetB!.Value, 1e-6, "meet B with / without the other bend in the window");
+  True(first.LinkCrossingsBefore == alone.LinkCrossingsBefore, $"crossings counted {first.LinkCrossingsBefore} vs {alone.LinkCrossingsBefore}: the other bend's loop was counted");
+  // a straight run with a bowtie bend beside it: no bowtie of its own
+  var none = SeamSolver.Solve(bl, sec, (_, _) => 6, 146, 148);
+  True(none.Status is SeamStatus.NoBend or SeamStatus.NoBowtie, $"no bend at 147, got {none.Status}");
+});
+
 // ---------------------------------------------------------------------------------------------------- refresh
 Test("refresh: polyline deviation - same shape with other vertices is 0; shift, level, tail and interior bulge are measured", () =>
 {
