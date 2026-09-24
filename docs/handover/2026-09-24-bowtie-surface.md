@@ -47,6 +47,21 @@ Live-tested 07:45 after an app restart: real `bowtie_surface` on FL-03 asked for
 change, no rebuild) and returned `checkedAfterCommit: true`. The automatic re-check after an actual change runs the same
 dry run that was checked by hand after every run today.
 
+## Wiring test (08:04, drawing QSAVEd after)
+Real `bowtie_refresh` on FL-03 with no design change (approval asked, background, 9 s): 8 of 8 `unchanged` (plan, level and
+meet stations 0), 8 of 8 clean in the built corridor, and the `surfaces` block present with `checkedAfterCommit: true`:
+Drain FL-03 Top closed_and_following, 8 breaklines, nothing changed. So fix / unfix / refresh hand over to bowtie_surface and
+the re-read works; the change path inside them is the same `bowtie_surface` code proven above.
+
+## Slope flags - decision (Amir, 24 Sep 08:03, on the engineer's behalf as a working assumption)
+The engineer accepts the slopes where the repair matches the two sides' levels at the valley (steeper than the 1:2 design,
+over short strips at the valley edge). No remedial change is made; the flags stay in the reports as a record:
+- FL-03 BT-274R at 274.741: 1:1.99 (offsets 2.05-10.05 and 11.05-13.09 m).
+- FL-03 BT-404L at 404.317: 1:1.78 (offsets 4.75-5.47 m).
+- FL-02 BT-384La/b at 383.43: 1:1.76.
+This does not close FL-02 at 384.17: there the drain top itself steps 0.3 m between two sections at one station (MD302 ->
+MD303), which one surface cannot follow - the transition is the junction topic.
+
 ## Next
 - Amir: decide the FL-02 384.17 drain-top step (junction topic) - then FL-02 Top should close fully on BT-384Lb.
 - Pasted / composite surfaces built from the Top surfaces (`Core FL-0x`, composites) may be out of date: rebuild them.
